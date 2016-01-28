@@ -1,0 +1,62 @@
+#!/bin/bash
+# Run the FX prediction command with flags.
+
+source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
+
+DEFINE_bool 'release' false 'Build as a release binary.'
+DEFINE_bool 'evaluate' false 'Evaluates the current model.'
+DEFINE_enum --values='CLOSE,CROSS,LIMIT' 'future' 'LIMIT' \
+    'Definition of future.'
+DEFINE_enum --values='FLAT,SQRT,LINEAR' 'future_curve' 'LINEAR' \
+    'Definition of future.'
+DEFINE_multiint 'training' '2011' 'Years for training.'
+DEFINE_multiint 'test' '2012' 'Years for evaluation.'
+DEFINE_bool 'dry_run' false 'Do not run the command.'
+DEFINE_string 'currency' 'USDJPY' 'Currency.'
+DEFINE_string --group='Internal' 'target' 'main' 'Target to compile.'
+
+eval "${IMOSH_INIT}"
+
+cd "$(dirname "${BASH_SOURCE}")"
+
+CXXFLAGS=(-g3 -std=c++0x -lpthread -lglog)
+if (( FLAGS_release )); then
+  CXXFLAGS+=(-O2 -DNDEBUG)
+else
+  CXXFLAGS+=(
+      -O0
+      -Weverything -Wno-c++98-compat-pedantic -Wno-c++98-compat
+      -Wno-old-style-cast -Wno-vla-extension -Wno-vla
+      -Wno-missing-prototypes -Wno-padded)
+fi
+
+LOG INFO 'Compiling...'
+"${CXX:-g++}" "${CXXFLAGS[@]}" -o "./bin/${FLAGS_target}" "./${FLAGS_target}.cc"
+
+if (( FLAGS_evaluate )); then
+  export FX_MODE='EVALUATE'
+fi
+export FX_FUTURE="${FLAGS_future}"
+export FX_FUTURE_CURVE="${FLAGS_future_curve}"
+
+LOG INFO 'Executing...'
+commands=("./bin/${FLAGS_target}")
+
+training=()
+for year in "${FLAGS_training[@]}"; do
+  training+=("data/${FLAGS_currency}/${year}.fxbin")
+done
+commands+=("$(sub::implode ',' training)")
+
+test=()
+for year in "${FLAGS_test[@]}"; do
+  test+=("data/${FLAGS_currency}/${year}.fxbin")
+done
+commands+=("$(sub::implode ',' test)")
+
+env | grep '^FX_'
+if (( FLAGS_dry_run )); then
+  echo "${commands[@]}"
+else
+  "${commands[@]}"
+fi
