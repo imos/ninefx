@@ -1,0 +1,14 @@
+#!/bin/bash
+
+cd ~
+if [ ! -f INSTALLED ]; then
+  sudo yum install -y gcc48-c++.x86_64
+  wget https://google-glog.googlecode.com/files/glog-0.3.3.tar.gz
+  tar xzvf glog-0.3.3.tar.gz
+  cd glog-0.3.3
+  ./configure --prefix=/usr
+  sudo make -j install
+  sudo ldconfig
+  cd ~
+  touch INSTALLED
+fi
