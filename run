@@ -5,12 +5,13 @@ source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
 
 DEFINE_bool 'release' false 'Build as a release binary.'
 DEFINE_bool 'evaluate' false 'Evaluates the current model.'
+DEFINE_int 'num_threads' 8 'Number of threads.'
 DEFINE_enum --values='CLOSE,CROSS,LIMIT' 'future' 'LIMIT' \
     'Definition of future.'
 DEFINE_enum --values='FLAT,SQRT,LINEAR' 'future_curve' 'LINEAR' \
     'Definition of future.'
-DEFINE_multiint 'training' '2011' 'Years for training.'
-DEFINE_multiint 'test' '2012' 'Years for evaluation.'
+DEFINE_list 'training' '2011' 'Years for training.'
+DEFINE_list 'test' '2012' 'Years for evaluation.'
 DEFINE_bool 'dry_run' false 'Do not run the command.'
 DEFINE_string 'currency' 'USDJPY' 'Currency.'
 DEFINE_string --group='Internal' 'target' 'main' 'Target to compile.'
@@ -25,7 +26,7 @@ if (( FLAGS_release )); then
 else
   CXXFLAGS+=(
       -O0
-      -Weverything -Wno-c++98-compat-pedantic -Wno-c++98-compat
+      -Wall -Wextra -Wno-c++98-compat-pedantic -Wno-c++98-compat
       -Wno-old-style-cast -Wno-vla-extension -Wno-vla
       -Wno-missing-prototypes -Wno-padded)
 fi
@@ -33,6 +34,7 @@ fi
 LOG INFO 'Compiling...'
 "${CXX:-g++}" "${CXXFLAGS[@]}" -o "./bin/${FLAGS_target}" "./${FLAGS_target}.cc"
 
+export FX_NUM_THREADS="${FLAGS_num_threads}"
 if (( FLAGS_evaluate )); then
   export FX_MODE='EVALUATE'
 fi
@@ -54,9 +56,8 @@ for year in "${FLAGS_test[@]}"; do
 done
 commands+=("$(sub::implode ',' test)")
 
-env | grep '^FX_'
-if (( FLAGS_dry_run )); then
-  echo "${commands[@]}"
-else
+env | grep '^FX_' >&2
+echo "${commands[@]}" >&2
+if (( ! FLAGS_dry_run )); then
   "${commands[@]}"
 fi

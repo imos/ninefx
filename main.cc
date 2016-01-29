@@ -1,11 +1,12 @@
-#include <assert.h>
 #include <glog/logging.h>
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
 #include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -18,11 +19,11 @@ using namespace std;
 
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
-const double kHighAndLowDistanceWeight = 1;
+const double kHighAndLowDistanceWeight = 0;
 // スプレッド
 const double kTradeSpread = 0.29 / 10000; // 0.58 / 12000;
 // 予測に用いる過去の指標の割合（0.05程度が目安）
-const double kPredictRatio = 0.001;
+const double kPredictRatio = 0.01;
 
 // 周期が2^64のXorshift乱数生成関数
 uint32_t Rand() {
@@ -41,6 +42,30 @@ int Sign(T x) {
 
 bool IsNan(double value) {
   return !(value >= 0.0) && !(value <= 0.0);
+}
+
+bool IsInf(double value) {
+  return ::std::isinf(value);
+}
+
+string StringPrintf(const char* const format, ...) {
+  va_list ap;
+  va_start(ap, format);
+  string result;
+  for (int length = 100; length < 1024 * 1024; length *= 2) {
+    char buf[length];
+    va_list backup_ap;
+    va_copy(backup_ap, ap);
+    int output = vsnprintf(buf, length, format, backup_ap);
+    va_end(backup_ap);
+
+    if (output >= 0 && output < length) {
+      result.append(buf, output);
+      break;
+    }
+  }
+  va_end(ap);
+  return result;
 }
 
 vector<string> Split(const string& str, char delimiter) {
@@ -186,8 +211,10 @@ class SegmentTree {
   }
 
   T Query(int from, int to) const {
-    assert(0 <= from && from < (int)data_[0].size());
-    assert(0 <= to && to < (int)data_[0].size());
+    CHECK_LE(0, from);
+    CHECK_LT(from, data_[0].size());
+    CHECK_LE(0, to);
+    CHECK_LT(to, data_[0].size());
     if (from > to) { return Query(to, from); }
     return InternalQuery(from, to, 0);
   }
@@ -254,7 +281,7 @@ struct Sum {
  public:
   Sum() : value_(0) { SetCount(0); }
   Sum(const T& t) : value_(t.GetRawValue()) {
-    assert(t.IsValid());
+    CHECK(t.IsValid());
     SetCount(1);
   }
 
@@ -325,7 +352,7 @@ struct TimeDifference {
   }
 
   static TimeDifference InMinute(double minute) {
-    assert(!isinf(minute));
+    assert(!IsInf(minute));
     assert(!IsNan(minute));
     assert(minute * 60 >= numeric_limits<int32_t>::min());
     assert(minute * 60 <= numeric_limits<int32_t>::max());
@@ -435,6 +462,10 @@ struct Time {
     return static_cast<int32_t>((GetSecond() + 30) / 60);
   }
 
+  int32_t GetWeekIndex() const {
+    return (GetMinuteIndex() - 4320) / (60 * 24 * 7);
+  }
+
   // 直近の日曜日0時(UTC)から経過した時間を分単位で返します．
   int32_t GetWeeklyIndex() const {
     return (GetMinuteIndex() - 4320) % (60 * 24 * 7);
@@ -458,33 +489,25 @@ struct Time {
     }
     time_t t = time_;
     struct tm *utc = gmtime(&t);
-    char buf[20];
-    snprintf(
-        buf,
-        sizeof(buf),
+    return StringPrintf(
         "%04d-%02d-%02d %02d:%02d:%02d",
-        utc->tm_year + 1900,
-        utc->tm_mon + 1,
-        utc->tm_mday,
-        utc->tm_hour,
-        utc->tm_min,
-        utc->tm_sec);
-    assert(buf[sizeof(buf) - 1] == 0);
-    return string(buf);
+        utc->tm_year + 1900, utc->tm_mon + 1, utc->tm_mday,
+        utc->tm_hour, utc->tm_min, utc->tm_sec);
   }
 
   uint32_t GetRawValue() const { return time_; }
   void SetRawValue(int64_t value) { SetSecond(value); }
 
   // 計算に安全な時刻であるかを返す．
-  bool IsSafeTime() const {
+  bool IsSafeTime(bool include_friday) const {
     int weekly_index = GetWeeklyIndex();
     // 月曜日の1時(UTC)までは週末の影響を受けやすいので除去．
     if (weekly_index < 60 * 24 * 1 + 60) { return false; }
     // 金曜日の18時(UTC)以降は流動性が下がるので除去．
     if (weekly_index >= 60 * 24 * 5 + 60 * 18) { return false; }
     // [OPTIONAL] 金曜日の9時(UTC)以降は指標発表の影響を受けるので除去．
-    if (weekly_index >= 60 * 24 * 5 + 60 * 9) { return false; }
+    if (include_friday &&
+        weekly_index >= 60 * 24 * 5 + 60 * 9) { return false; }
     return true;
   }
 
@@ -663,11 +686,7 @@ struct Price {
     double real_price = GetRealPrice();
     int upper_digits = max((int)floor(log10(real_price) + 1), 1);
     int lower_digits = max(0, 6 - upper_digits);
-    char buf[upper_digits + (lower_digits == 0 ? -1 : lower_digits) + 2];
-    snprintf(buf, sizeof(buf), "%.*f", lower_digits, real_price);
-    CHECK_EQ(buf[sizeof(buf) - 1], 0)
-        << "Unexpected value: " << string(buf, sizeof(buf));
-    return string(buf);
+    return StringPrintf("%.*f", lower_digits, real_price);
   }
 
   int32_t GetRawValue() const { return log_price_; }
@@ -926,7 +945,7 @@ class Rates {
     return rates_.rbegin();
   }
 
-  void Load(const vector<string>& files) {
+  void Load(const vector<string>& files, bool is_training) {
     int skipped_ticks = 0;
     for (const string& file : files) {
       FILE* fp = fopen(file.c_str(), "r");
@@ -939,16 +958,16 @@ class Rates {
         Rate rate;
         if (!rate.Load(fp)) { break; }
         // TODO(imos): フラグで選択できるようにする
-        if (!rate.GetTime().IsSafeTime()) {
+        if (!rate.GetTime().IsSafeTime(is_training)) {
           skipped_ticks++;
           continue;
         }
-        // 10分以下の抜けを埋める．
+        // 60分以下の抜けを埋める．
         if (rates_.size() > 0) {
           int difference_in_minute =
               (int)round((rate.GetTime() -
                           rates_.back().GetTime()).GetMinute());
-          if (1 < difference_in_minute && difference_in_minute <= 10) {
+          if (1 < difference_in_minute && difference_in_minute <= 60) {
             for (int i = 1; i < difference_in_minute; i++) {
               rates_.push_back(rates_.back().NextRate());
             }
@@ -1003,7 +1022,7 @@ class Rates {
       double price_difference =
           (current_price.GetLogPrice()
            - previous_price.GetLogPrice()) / scale_factor;
-      assert(!IsNan(price_difference) && !isinf(price_difference));
+      assert(!IsNan(price_difference) && !IsInf(price_difference));
       sum += Volatility(price_difference * price_difference);
     }
     assert(sum.GetCount() == kShortVolatilityDuration);
@@ -1239,7 +1258,7 @@ class AccumulatedRates {
   int GetDenseIndexOrNext(Time time) const {
     if (time < start_time_) { return 0; }
     if (end_time_ < time) {
-      assert(0 <= count_.size());
+      CHECK_LT(0, count_.size());
       return (int)count_.back() + 1;
     }
 
@@ -1251,7 +1270,7 @@ class AccumulatedRates {
   int GetDenseIndexOrPrevious(Time time) const {
     if (time < start_time_) { return -1; }
     if (end_time_ < time) {
-      assert(0 <= count_.size());
+      CHECK_LT(0, count_.size());
       return (int)count_.back();
     }
 
@@ -1317,10 +1336,10 @@ class DailyVolatility {
       assert(0 <= time_index);
       double current_volatility = volatilities.back().GetValue();
       assert(current_volatility >= 0);
-      assert(!IsNan(current_volatility) && !isinf(current_volatility));
+      assert(!IsNan(current_volatility) && !IsInf(current_volatility));
       double average_volatility = sum.GetAverageVolatility().GetValue();
       assert(average_volatility >= 0);
-      assert(!IsNan(average_volatility) && !isinf(average_volatility));
+      assert(!IsNan(average_volatility) && !IsInf(average_volatility));
       daily_volatility_sum[(size_t)time_index]
           += pow(current_volatility / average_volatility, 1 / 2.0);
       daily_volatility_count[(size_t)time_index]++;
@@ -1428,9 +1447,9 @@ struct AdjustedPrice {
     }
 
     Price upper_bound =
-        current_volatility.GetPrice(current_price, to - now, 1.0);
+        current_volatility.GetPrice(current_price, to - now, 1);
     Price lower_bound =
-        current_volatility.GetPrice(current_price, to - now, -1.0);
+        current_volatility.GetPrice(current_price, to - now, -1);
 
     Price final_price;
     {
@@ -1523,7 +1542,7 @@ struct AdjustedPrice {
                                 * volatility.GetValue()
                                 * sqrt(fabs(interval.GetMinute()));
     double log_price = round(base_price.GetLogPrice() + price_difference);
-    if (IsNan(log_price) || isinf(log_price) ||
+    if (IsNan(log_price) || IsInf(log_price) ||
         log_price < numeric_limits<int32_t>::min() ||
         log_price > numeric_limits<int32_t>::max()) {
       LOG(FATAL)
@@ -1755,16 +1774,20 @@ struct FeatureConfig {
  public:
   static constexpr size_t kFeatureSize = 3;
 
+  FeatureConfig() : FeatureConfig({}, 0) {}
+
   FeatureConfig(const vector<int>& past, int future) {
-    assert(past.size() <= kFeatureSize);
+    CHECK_LE(past.size(), kFeatureSize);
     for (size_t i = 0; i < kFeatureSize; i++) {
       past_[i] = i < past.size() ? past[i] : 0;
     }
+    past_size_ = past.size();
     future_ = future;
   }
 
   TimeDifference GetPast(int index, int ratio) const {
-    assert(0 <= index && index < (int)kFeatureSize);
+    CHECK_LE(0, index);
+    CHECK_LT(index, past_size_);
     return TimeDifference::InMinute(past_[index] * ratio);
   }
 
@@ -1772,8 +1795,11 @@ struct FeatureConfig {
     return TimeDifference::InMinute(future_ * ratio);
   }
 
+  size_t GetPastSize() const { return past_size_; }
+
  private:
   int past_[kFeatureSize];
+  size_t past_size_;
   int future_;
 };
 
@@ -1789,9 +1815,8 @@ class Feature {
             int ratio,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
     TimeDifference last_difference = TimeDifference::InMinute(0);
-    for (size_t i = 0; i < kFeatureSize; i++) {
+    for (size_t i = 0; i < config.GetPastSize(); i++) {
       TimeDifference past_differnce = config.GetPast((int)i, ratio);
-      if (past_differnce.GetSecond() == 0) { break; }
       if (!past_[i].Init(rates,
                          now - past_differnce,
                          now - last_difference - TimeDifference::InMinute(1),
@@ -1811,9 +1836,12 @@ class Feature {
     return true;
   }
 
-  double MeasureDistance(const Feature& feature) const {
+  double MeasureDistance(const FeatureConfig& config,
+                         const Feature& feature) const {
     double distance = 0.0;
-    for (size_t i = 0; i < kFeatureSize; i++) {
+    for (size_t i = 0; i < config.GetPastSize(); i++) {
+      DCHECK(past_[i].IsValid());
+      DCHECK(feature.past_[i].IsValid());
       distance += past_[i].MeasureDistance(feature.past_[i]);
     }
     return distance;
@@ -1922,8 +1950,10 @@ struct AdjustedPriceWeightedSum {
 class Features {
  public:
   Features() {}
-  Features(const vector<Feature> features, const string& name)
-      : name_(name), features_(features) {
+  Features(const vector<Feature> features,
+           const FeatureConfig& config,
+           const string& name)
+      : name_(name), config_(config), features_(features) {
     fprintf(stderr, "Features for %s\n", name_.c_str());
     InitTotalWeight();
     InitFuturePrice();
@@ -1934,6 +1964,7 @@ class Features {
             int ratio_from,
             int ratio_to) {
     name_ = rates.GetName();
+    config_ = config;
     fprintf(stderr, "Generating features for %s...\n", name_.c_str());
 
     Time next_time = rates.GetStartTime();
@@ -2067,13 +2098,13 @@ class Features {
       size_t min_index = 0;
       for (size_t index = 0; index < candidate_features.size(); index++) {
         const Feature& candidate_feature = candidate_features[index];
-        double distance = feature.MeasureDistance(candidate_feature);
+        double distance = feature.MeasureDistance(config_, candidate_feature);
         if (distance < min_distance) {
           min_distance = distance;
           min_index = index;
         }
       }
-      assert(!isinf(min_distance));
+      assert(!IsInf(min_distance));
 
       {
         lock_guard<mutex> new_features_mutex_guard(new_features_mutex);
@@ -2100,7 +2131,7 @@ class Features {
     fprintf(stderr, "Average future price: %.6f\n",
             future_price.GetAverage().GetRegularizedPrice().GetRealPrice());
 
-    return Features(average_features, "clustered " + name_);
+    return Features(average_features, config_, "clustered " + name_);
   }
 
   AdjustedPrice Predict(const Feature& target) const {
@@ -2111,7 +2142,7 @@ class Features {
          feature_index < features_.size(); feature_index++) {
       const Feature& feature = features_[feature_index];
       distance_to_index.emplace_back(
-          feature.MeasureDistance(target), feature_index);
+          feature.MeasureDistance(config_, target), feature_index);
     }
     sort(distance_to_index.begin(), distance_to_index.end());
     AdjustedPriceWeightedSum result;
@@ -2141,6 +2172,7 @@ class Features {
 
  private:
   string name_;
+  FeatureConfig config_;
   vector<Feature> features_;
   AdjustedPriceStat future_stat_;
   int32_t total_weight_;
@@ -2188,12 +2220,12 @@ struct Leverage {
   Leverage() : minimal_leverage_(NAN), maximal_leverage_(NAN) {}
 
   void Extend(double leverage) {
-    if (isnan(leverage)) { return; }
+    if (IsNan(leverage)) { return; }
 
-    if (isnan(minimal_leverage_) || leverage < minimal_leverage_) {
+    if (IsNan(minimal_leverage_) || leverage < minimal_leverage_) {
       minimal_leverage_ = leverage;
     }
-    if (isnan(maximal_leverage_) || leverage > maximal_leverage_) {
+    if (IsNan(maximal_leverage_) || leverage > maximal_leverage_) {
       maximal_leverage_ = leverage;
     }
   }
@@ -2212,8 +2244,8 @@ class Correlation {
       : sum_(0), x_sum_(0), xx_sum_(0), y_sum_(0), yy_sum_(0), xy_sum_(0) {}
 
   void Add(double x, double y) {
-    CHECK(!IsNan(x) && !isinf(x)) << "X is invalid: " << x;
-    CHECK(!IsNan(y) && !isinf(y)) << "Y is invalid: " << y;
+    CHECK(!IsNan(x) && !IsInf(x)) << "X is invalid: " << x;
+    CHECK(!IsNan(y) && !IsInf(y)) << "Y is invalid: " << y;
     sum_ += 1;
     x_sum_ += x;
     xx_sum_ += x * x;
@@ -2222,11 +2254,21 @@ class Correlation {
     xy_sum_ += x * y;
   }
 
+  double GetWeight() const { return sum_; }
+
   double Calculate() const {
     CHECK_NE(sum_, 0) << "No data is available.";
     return (xy_sum_ * sum_ - x_sum_ * y_sum_)
              / sqrt(xx_sum_ * sum_ - x_sum_ * x_sum_)
              / sqrt(yy_sum_ * sum_ - y_sum_ * y_sum_);
+  }
+
+  string DebugString() const {
+    return StringPrintf(
+        "n: %.4f, E(x): %.4f, E(xx): %.4f, "
+        "E(y): %.4f, E(yy): %.4f, E(xy): %.4f",
+        sum_, x_sum_ / sum_, xx_sum_ / sum_,
+        y_sum_ / sum_, yy_sum_ / sum_, xy_sum_ / sum_);
   }
 
  private:
@@ -2238,6 +2280,43 @@ class Correlation {
   double xy_sum_;
 };
 
+class Correlations {
+ public:
+  Correlations() : sum_(0), x_sum_(0), xx_sum_(0) {}
+
+  void Add(double x, double y) {
+    correlation_.Add(x, y);
+  }
+
+  void Commit() {
+    double weight = correlation_.GetWeight();
+    CHECK(!IsNan(weight) && !IsInf(weight));
+    if (weight < 1e-6) {
+      return;
+    }
+
+    double x = correlation_.Calculate();
+    CHECK(!IsNan(x) && !IsInf(x))
+        << "Bad correlation: " << x << ", " << correlation_.DebugString();
+    sum_ += weight;
+    x_sum_ += x * weight;
+    xx_sum_ += x * x * weight;
+    correlation_ = Correlation();
+  }
+
+  string DebugString() const {
+    return StringPrintf("%.4f±%.4f",
+                        x_sum_ / sum_, 
+                        sqrt(xx_sum_ / sum_ - x_sum_ * x_sum_ / sum_ / sum_));
+  }
+
+ private:
+  Correlation correlation_;
+  double sum_;
+  double x_sum_;
+  double xx_sum_;
+};
+
 class Simulator {
  public:
   Simulator(const AccumulatedRates* training_rates,
@@ -2246,72 +2325,78 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void EvaluateFeatures() {
-    const FeatureConfig feature_config({1, 8, 64}, 8);
-    // const FeatureConfig feature_config({1, 6, 12}, 6);
+    // const FeatureConfig feature_config({1, 8, 64}, 8);
+    const FeatureConfig feature_config({1, 6, 12}, 6);
 
     Features clustered_features;
     {
       Features training_features;
-      training_features.Init(feature_config, *training_rates_, 4, 32);
+      training_features.Init(feature_config, *training_rates_, 4, 64);
       // training_features.Init(feature_config, *training_rates_, 16, 64);
       clustered_features = training_features.Cluster(1000);
       clustered_features.Print();
     }
 
     const int kRatioSize = 7;
-    Correlation correlation[kRatioSize];
-    Time next_now = test_rates_->GetStartTime();
-    mutex now_mutex;
-    mutex correlation_mutex;
-    mutex print_mutex;
-    Parallel([&](int){
-      Time now;
-      {
-        lock_guard<mutex> now_mutex_guard(now_mutex);
-        now = next_now;
-        if (!(now < test_rates_->GetEndTime())) {
-          return false;
-        }
-        next_now.AddMinute(5);
-      }
+    Correlations correlations[kRatioSize];
+    for (Time next_now = test_rates_->GetStartTime();
+         next_now < test_rates_->GetEndTime();) {
+      int32_t week_index = next_now.GetWeekIndex();
 
-      for (int ratio_index = 0; ratio_index < kRatioSize; ratio_index++) {
-        const int ratio = 1 << ratio_index;
-        Feature feature;
-        if (!feature.Init(feature_config, *test_rates_, now, ratio) ||
-            !feature.GetFuturePrice().IsValid()) {
-          continue;
-        }
-
-        AdjustedPrice actual_price = feature.GetFuturePrice();
-        feature.ClearFuturePrice();
-        AdjustedPrice predicted_price = clustered_features.Predict(feature);
-
+      mutex now_mutex;
+      mutex correlation_mutex;
+      mutex print_mutex;
+      Parallel([&](int){
+        Time now;
         {
-          lock_guard<mutex> correlation_mutex_guard(correlation_mutex);
-          double x = log(actual_price.GetRatio());
-          double y = log(predicted_price.GetRatio());
-          correlation[ratio_index].Add(x, y);
+          lock_guard<mutex> now_mutex_guard(now_mutex);
+          now = next_now;
+          if (!(now < test_rates_->GetEndTime()) ||
+              now.GetWeekIndex() != week_index) {
+            return false;
+          }
+          next_now.AddMinute(1);
         }
 
-        if (now.GetMinuteIndex() % (24 * 60) == 0) {
-          lock_guard<mutex> print_mutex_guard(print_mutex);
-          printf("%s[% 3d]: actual: %s, predicted: %s\n",
-                 now.DebugString().c_str(),
-                 ratio,
-                 actual_price.DebugString().c_str(),
-                 predicted_price.DebugString().c_str());
+        for (int ratio_index = 0; ratio_index < kRatioSize; ratio_index++) {
+          const int ratio = 1 << ratio_index;
+          Feature feature;
+          if (!feature.Init(feature_config, *test_rates_, now, ratio) ||
+              !feature.GetFuturePrice().IsValid()) {
+            continue;
+          }
+
+          AdjustedPrice actual_price = feature.GetFuturePrice();
+          feature.ClearFuturePrice();
+          AdjustedPrice predicted_price = clustered_features.Predict(feature);
+
+          {
+            lock_guard<mutex> correlation_mutex_guard(correlation_mutex);
+            double x = log(actual_price.GetRatio());
+            double y = log(predicted_price.GetRatio());
+            correlations[ratio_index].Add(x, y);
+          }
+
+          if (now.GetMinuteIndex() % (24 * 60) == 0) {
+            lock_guard<mutex> print_mutex_guard(print_mutex);
+            printf("%s[% 3d]: actual: %s, predicted: %s\n",
+                   now.DebugString().c_str(),
+                   ratio,
+                   actual_price.DebugString().c_str(),
+                   predicted_price.DebugString().c_str());
+          }
         }
+
+        return true;
+      });
+      for (int ratio_index = 0; ratio_index < kRatioSize; ratio_index++) {
+        correlations[ratio_index].Commit();
+        printf("Ratio: % 3d, Correlation: %s\n",
+               1 << ratio_index,
+               correlations[ratio_index].DebugString().c_str());
       }
-
-      return true;
-    });
-
-    for (int ratio_index = 0; ratio_index < kRatioSize; ratio_index++) {
-      printf("Ratio: % 3d, Correlation: %.4f\n",
-             1 << ratio_index,
-             correlation[ratio_index].Calculate());
     }
+
   }
 
   AdjustedPrice Predict(const Features& model,
@@ -2501,13 +2586,13 @@ int main(int argc, char** argv) {
   }
 
   unique_ptr<Rates> training_rates(new Rates());
-  training_rates->Load(Split(argv[1], ','));
+  training_rates->Load(Split(argv[1], ','), true /* is_training */);
   unique_ptr<AccumulatedRates> training_accumulated_rates(
       new AccumulatedRates("training data", *training_rates));
   training_rates.reset();
 
   unique_ptr<Rates> test_rates(new Rates());
-  test_rates->Load(Split(argv[2], ','));
+  test_rates->Load(Split(argv[2], ','), false /* is_training */);
   unique_ptr<AccumulatedRates> test_accumulated_rates(
       new AccumulatedRates("test data", *test_rates));
   test_rates.reset();
