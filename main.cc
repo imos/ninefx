@@ -19,7 +19,7 @@ using namespace std;
 
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
-const double kHighAndLowDistanceWeight = 0;
+const double kHighAndLowDistanceWeight = 1;
 // スプレッド
 const double kTradeSpread = 0.29 / 10000; // 0.58 / 12000;
 // 予測に用いる過去の指標の割合（0.05程度が目安）
@@ -130,6 +130,9 @@ struct Params {
     params->mode = Mode().ParseEnvironment("FX_MODE");
     params->future = Future().ParseEnvironment("FX_FUTURE");
     params->future_curve = FutureCurve().ParseEnvironment("FX_FUTURE_CURVE");
+    params->daily_volatility = (GetInteger("FX_DAILY_VOLATILITY", 0) != 0);
+    params->base_volatility_interval =
+        GetInteger("FX_BASE_VOLATILITY_INTERVAL", 24 * 60);
   }
 
   static void Print(FILE* stream = stderr, const string& indent = "") {
@@ -170,6 +173,8 @@ struct Params {
   Mode::Type mode;
   Future::Type future;
   FutureCurve::Type future_curve;
+  bool daily_volatility;
+  int base_volatility_interval;
 
  private:
   static Params* MutableParams() {
@@ -223,12 +228,12 @@ class SegmentTree {
     fprintf(stderr, "Testing SegmentTree...\n");
 
     SegmentTree<T, const T&, min<T>> small({1, 2, 3});
-    assert(small.Query(0, 0) == 1);
-    assert(small.Query(1, 1) == 2);
-    assert(small.Query(2, 2) == 3);
-    assert(small.Query(0, 1) == 1);
-    assert(small.Query(1, 2) == 2);
-    assert(small.Query(0, 2) == 1);
+    CHECK_EQ(1, small.Query(0, 0));
+    CHECK_EQ(2, small.Query(1, 1));
+    CHECK_EQ(3, small.Query(2, 2));
+    CHECK_EQ(1, small.Query(0, 1));
+    CHECK_EQ(2, small.Query(1, 2));
+    CHECK_EQ(1, small.Query(0, 2));
 
     vector<int32_t> data;
     for (int i = 0; i < 29; i++) {
@@ -237,7 +242,8 @@ class SegmentTree {
     SegmentTree segment_tree(data);
     for (int i = 0; i < (int)data.size(); i++) {
       for (int j = i; j < (int)data.size(); j++) {
-        assert(segment_tree.Query(i, j) == segment_tree.Naive(i, j));
+        CHECK_EQ(segment_tree.Query(i, j), segment_tree.Naive(i, j))
+            << "i=" << i << ", j=" << j;
       }
     }
 
@@ -745,6 +751,10 @@ struct Volatility {
         (float)sqrt((double)volatility_ / value.volatility_));
   }
 
+  Volatility operator*(VolatilityRatio ratio) const {
+    return Volatility(GetValue() * ratio.GetValue());
+  }
+
   bool IsValid() const {
     return volatility_ >= 0;
   }
@@ -1048,6 +1058,122 @@ class Rates {
   vector<Rate> rates_;
 };
 
+class DailyVolatility {
+ public:
+  static constexpr double kDailyVolatilityScale = 10000000.0;
+
+  DailyVolatility() {}
+
+  size_t size() const {
+    return daily_volatility_sum_.size();
+  }
+
+  double operator[](int index) const {
+    assert(0 <= index && index < (int)daily_volatility_sum_.size());
+    return (daily_volatility_sum_[(size_t)index]
+            - (index == 0 ? 0 : daily_volatility_sum_[(size_t)(index - 1)]))
+           / kDailyVolatilityScale;
+  }
+
+  void Init(const Rates& rates, bool is_summer_time) {
+    deque<Time> times;
+    deque<Volatility> volatilities;
+    vector<double> daily_volatility_sum(60 * 24, 0.0);
+    vector<int32_t> daily_volatility_count(60 * 24, 0);
+    VolatilitySum sum;
+    for (int index = 0; index < (int)rates.size(); index++) {
+      if (rates[index].GetTime().IsSummerTime() != is_summer_time) { continue; }
+
+      Volatility volatility = rates.GetVolatility(index);
+      if (!volatility.IsValid()) { continue; }
+      times.push_back(rates[index].GetTime());
+      volatilities.push_back(volatility);
+      sum += volatility;
+
+      while ((times.back() - times.front()).GetSecond() > 60 * 60 * 24 * 7) {
+        sum -= volatilities.front();
+        times.pop_front();
+        volatilities.pop_front();
+      }
+
+      if (times.size() < 60 * 24 * 7 / 2) { continue; }
+      int time_index = times.back().GetMinuteIndex() % (60 * 24);
+      assert(0 <= time_index);
+      double current_volatility = volatilities.back().GetValue();
+      assert(current_volatility >= 0);
+      assert(!IsNan(current_volatility) && !IsInf(current_volatility));
+      double average_volatility = sum.GetAverageVolatility().GetValue();
+      assert(average_volatility >= 0);
+      assert(!IsNan(average_volatility) && !IsInf(average_volatility));
+      daily_volatility_sum[(size_t)time_index]
+          += pow(current_volatility / average_volatility, 1 / 2.0);
+      daily_volatility_count[(size_t)time_index]++;
+    }
+    vector<double> daily_volatility;
+    for (int i = 0; i < (int)daily_volatility_sum.size(); i++) {
+      daily_volatility.push_back(
+          pow(daily_volatility_sum[(size_t)i]
+              / daily_volatility_count[(size_t)i], 2));
+    }
+    double volatility_sum = 0.0;
+    for (double value : daily_volatility) {
+      volatility_sum += value * value;
+    }
+    daily_volatility_sum_.clear();
+    int64_t accumulated_daily_volatility = 0;
+    for (double value : daily_volatility) {
+      double scaled_value =
+          round(value / sqrt(volatility_sum / daily_volatility.size())
+                      * kDailyVolatilityScale);
+      assert(numeric_limits<int32_t>::min() <= scaled_value &&
+             scaled_value <= numeric_limits<int32_t>::max());
+      accumulated_daily_volatility += (int32_t)scaled_value;
+      daily_volatility_sum_.push_back(accumulated_daily_volatility);
+    }
+  }
+
+  VolatilityRatio GetVolatilityBetween(Time from, Time to) const {
+    int from_index = from.GetMinuteIndex() - 1;
+    int to_index = to.GetMinuteIndex();
+    int64_t result =
+        daily_volatility_sum_[to_index % (60 * 24)]
+        - daily_volatility_sum_[from_index % (60 * 24)]
+        + daily_volatility_sum_[60 * 24 - 1]
+            * (to_index / (60 * 24) - from_index / (60 * 24));
+    return VolatilityRatio(
+        result / kDailyVolatilityScale / (to_index - from_index));
+  }
+
+  string DebugString() const {
+    string result;
+
+    result += "{summary: [";
+    char buf[100];
+    for (int i = 0; i < (int)size(); i += 60) {
+      sprintf(buf, "%.3f", (*this)[i]);
+      if (i != 0) { result += ", "; }
+      result += buf;
+    }
+    result += "], ";
+
+    // ボラティリティの2乗の平均は 1 日を通して 1.0 となるように調整されているか確認する．
+    // NOTE: ここで表示される値は 1 日で発生する誤差（0.01% 以下であれば十分）
+    double sum = 0.0;
+    for (int i = 0; i < (int)size(); i++) {
+      sum += pow((*this)[i], 2.0);
+    }
+    result += "error_for_one_day: ";
+    sprintf(buf, "%e", sum / size() - 1);
+    result += buf;
+    result += "}";
+
+    return result;
+  }
+
+ private:
+  vector<int64_t> daily_volatility_sum_;
+};
+
 class AccumulatedRates {
  public:
   AccumulatedRates() : name_("unknown data"), initialized_(false) {}
@@ -1102,6 +1228,14 @@ class AccumulatedRates {
     fprintf(stderr, "%s\n", DebugString().c_str());
   }
 
+  void InitDailyVolatility(const Rates& rates) {
+    CHECK(&rates != nullptr);
+    if (GetParams().daily_volatility) {
+      winter_daily_volatility_.Init(rates, false /* is_summer_time */);
+      summer_daily_volatility_.Init(rates, true /* is_summer_time */);
+    }
+  }
+
   int Count(Time from, Time to) const {
     if (to < from) { return Count(to, from); }
 
@@ -1136,12 +1270,16 @@ class AccumulatedRates {
   }
 
   Volatility GetVolatility(Time to) const {
-    Time from = to - TimeDifference::InMinute(60 * 24 * 7);
+    Time from = to - TimeDifference::InMinute(
+        GetParams().base_volatility_interval);
 
     int from_index = GetDenseIndexOrNext(from);
     int to_index = GetDenseIndexOrPrevious(to);
     if (from_index > to_index) { return Volatility::Invalid(); }
-    if ((to_index - from_index) < 60 * 24 * 4) { return Volatility::Invalid(); }
+    if ((to_index - from_index)
+        < GetParams().base_volatility_interval * 0.75) {
+      return Volatility::Invalid();
+    }
 
     assert(0 <= from_index && from_index < (int)count_.size());
     assert(0 <= to_index && to_index < (int)count_.size());
@@ -1149,6 +1287,14 @@ class AccumulatedRates {
     Volatility volatility =
         volatility_sum_.Query(from_index, to_index).GetAverageVolatility();
     assert(volatility.GetRawValue() > 0);
+    if (GetParams().daily_volatility) {
+      volatility =
+          volatility
+          * (to.IsSummerTime() ? summer_daily_volatility_
+                               : winter_daily_volatility_)
+                .GetVolatilityBetween(
+                    to - TimeDifference::InMinute(4 * 60), to);
+    }
     return volatility;
   }
 
@@ -1280,6 +1426,8 @@ class AccumulatedRates {
   }
 
   string name_;
+  DailyVolatility winter_daily_volatility_;
+  DailyVolatility summer_daily_volatility_;
   SegmentTree<TimeSum, TimeSum, TimeSum::Add> time_sum_;
   SegmentTree<Price, const Price&, max<Price>> high_;
   SegmentTree<Price, const Price&, min<Price>> low_;
@@ -1291,110 +1439,6 @@ class AccumulatedRates {
   Time start_time_;
   Time end_time_;
   bool initialized_;
-};
-
-class DailyVolatility {
- public:
-  static constexpr double kDailyVolatilityScale = 10000000.0;
-
-  DailyVolatility() {}
-
-  size_t size() const {
-    return daily_volatility_sum_.size();
-  }
-
-  double operator[](int index) const {
-    assert(0 <= index && index < (int)daily_volatility_sum_.size());
-    return (daily_volatility_sum_[(size_t)index]
-            - (index == 0 ? 0 : daily_volatility_sum_[(size_t)(index - 1)]))
-           / kDailyVolatilityScale;
-  }
-
-  void Init(const Rates& rates, bool is_summer_time) {
-    deque<Time> times;
-    deque<Volatility> volatilities;
-    vector<double> daily_volatility_sum(60 * 24, 0.0);
-    vector<int32_t> daily_volatility_count(60 * 24, 0);
-    VolatilitySum sum;
-    for (int index = 0; index < (int)rates.size(); index++) {
-      if (rates[index].GetTime().IsSummerTime() != is_summer_time) { continue; }
-
-      Volatility volatility = rates.GetVolatility(index);
-      if (!volatility.IsValid()) { continue; }
-      times.push_back(rates[index].GetTime());
-      volatilities.push_back(volatility);
-      sum += volatility;
-
-      while ((times.back() - times.front()).GetSecond() > 60 * 60 * 24 * 7) {
-        sum -= volatilities.front();
-        times.pop_front();
-        volatilities.pop_front();
-      }
-
-      if (times.size() < 60 * 24 * 7 / 2) { continue; }
-      int time_index = times.back().GetMinuteIndex() % (60 * 24);
-      assert(0 <= time_index);
-      double current_volatility = volatilities.back().GetValue();
-      assert(current_volatility >= 0);
-      assert(!IsNan(current_volatility) && !IsInf(current_volatility));
-      double average_volatility = sum.GetAverageVolatility().GetValue();
-      assert(average_volatility >= 0);
-      assert(!IsNan(average_volatility) && !IsInf(average_volatility));
-      daily_volatility_sum[(size_t)time_index]
-          += pow(current_volatility / average_volatility, 1 / 2.0);
-      daily_volatility_count[(size_t)time_index]++;
-    }
-    vector<double> daily_volatility;
-    for (int i = 0; i < (int)daily_volatility_sum.size(); i++) {
-      daily_volatility.push_back(
-          pow(daily_volatility_sum[(size_t)i]
-              / daily_volatility_count[(size_t)i], 2));
-    }
-    double volatility_sum = 0.0;
-    for (double value : daily_volatility) {
-      volatility_sum += value * value;
-    }
-    daily_volatility_sum_.clear();
-    int64_t accumulated_daily_volatility = 0;
-    for (double value : daily_volatility) {
-      double scaled_value =
-          round(value / sqrt(volatility_sum / daily_volatility.size())
-                      * kDailyVolatilityScale);
-      assert(numeric_limits<int32_t>::min() <= scaled_value &&
-             scaled_value <= numeric_limits<int32_t>::max());
-      accumulated_daily_volatility += (int32_t)scaled_value;
-      daily_volatility_sum_.push_back(accumulated_daily_volatility);
-    }
-  }
-
-  string DebugString() const {
-    string result;
-
-    result += "{summary: [";
-    char buf[100];
-    for (int i = 0; i < (int)size(); i += 60) {
-      sprintf(buf, "%.3f", (*this)[i]);
-      if (i != 0) { result += ", "; }
-      result += buf;
-    }
-    result += "], ";
-
-    // ボラティリティの2乗の平均は 1 日を通して 1.0 となるように調整されているか確認する．
-    // NOTE: ここで表示される値は 1 日で発生する誤差（0.01% 以下であれば十分）
-    double sum = 0.0;
-    for (int i = 0; i < (int)size(); i++) {
-      sum += pow((*this)[i], 2.0);
-    }
-    result += "error_for_one_day: ";
-    sprintf(buf, "%e", sum / size() - 1);
-    result += buf;
-    result += "}";
-
-    return result;
-  }
-
- private:
-  vector<int64_t> daily_volatility_sum_;
 };
 
 struct AdjustedPrice {
@@ -2589,12 +2633,15 @@ int main(int argc, char** argv) {
   training_rates->Load(Split(argv[1], ','), true /* is_training */);
   unique_ptr<AccumulatedRates> training_accumulated_rates(
       new AccumulatedRates("training data", *training_rates));
-  training_rates.reset();
+  training_accumulated_rates->InitDailyVolatility(*training_rates);
 
   unique_ptr<Rates> test_rates(new Rates());
   test_rates->Load(Split(argv[2], ','), false /* is_training */);
   unique_ptr<AccumulatedRates> test_accumulated_rates(
       new AccumulatedRates("test data", *test_rates));
+  test_accumulated_rates->InitDailyVolatility(*training_rates);
+
+  training_rates.reset();
   test_rates.reset();
 
   Simulator simulator(training_accumulated_rates.get(),
