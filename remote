@@ -1,6 +1,6 @@
 #!/bin/bash
 
-REMOTE_HOST=54.178.93.53
+REMOTE_HOST=54.238.191.237
 
 source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
 

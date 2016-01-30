@@ -8,8 +8,12 @@ DEFINE_bool 'evaluate' false 'Evaluates the current model.'
 DEFINE_int 'num_threads' 8 'Number of threads.'
 DEFINE_enum --values='CLOSE,CROSS,LIMIT' 'future' 'LIMIT' \
     'Definition of future.'
-DEFINE_enum --values='FLAT,SQRT,LINEAR' 'future_curve' 'LINEAR' \
+DEFINE_enum --values='FLAT,SQRT,LINEAR,LINEAR_CUT' 'future_curve' 'LINEAR' \
     'Definition of future.'
+DEFINE_bool 'daily_volatility' false 'Use daily volatility.'
+DEFINE_int 'base_volatility_interval' 1440 'Interval for base volatility.'
+DEFINE_bool 'future_variation' false 'Variation of future.'
+
 DEFINE_list 'training' '2011' 'Years for training.'
 DEFINE_list 'test' '2012' 'Years for evaluation.'
 DEFINE_bool 'dry_run' false 'Do not run the command.'
@@ -40,6 +44,16 @@ if (( FLAGS_evaluate )); then
 fi
 export FX_FUTURE="${FLAGS_future}"
 export FX_FUTURE_CURVE="${FLAGS_future_curve}"
+if (( FLAGS_alsologtostderr )); then
+  export FX_ALSOLOGTOSTDERR=1
+fi
+if (( FLAGS_daily_volatility )); then
+  export FX_DAILY_VOLATILITY=1
+fi
+export FX_BASE_VOLATILITY_INTERVAL="${FLAGS_base_volatility_interval}"
+if (( FLAGS_future_variation )); then
+  export FX_FUTURE_VARIATION="${FLAGS_future_variation}"
+fi
 
 LOG INFO 'Executing...'
 commands=("./bin/${FLAGS_target}")

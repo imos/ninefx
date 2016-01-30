@@ -122,7 +122,7 @@ struct Params {
  public:
   REGISTER_ENUM(Mode, SIMULATE, EVALUATE);
   REGISTER_ENUM(Future, CLOSE, CROSS, LIMIT);
-  REGISTER_ENUM(FutureCurve, FLAT, SQRT, LINEAR);
+  REGISTER_ENUM(FutureCurve, FLAT, SQRT, LINEAR, LINEAR_CUT);
 
   static void Init() {
     Params* params = MutableParams();
@@ -133,20 +133,7 @@ struct Params {
     params->daily_volatility = (GetInteger("FX_DAILY_VOLATILITY", 0) != 0);
     params->base_volatility_interval =
         GetInteger("FX_BASE_VOLATILITY_INTERVAL", 24 * 60);
-  }
-
-  static void Print(FILE* stream = stderr, const string& indent = "") {
-    fprintf(stream, "{\n");
-    fprintf(stream, "%s  num_threads: %d,\n",
-            indent.c_str(), GetParams().num_threads);
-    fprintf(stream, "%s  mode: \"%s\",\n",
-            indent.c_str(), Mode().GetName(GetParams().mode).c_str());
-    fprintf(stream, "%s  future: \"%s\",\n",
-            indent.c_str(), Future().GetName(GetParams().future).c_str());
-    fprintf(stream, "%s  future_curve: \"%s\",\n",
-            indent.c_str(),
-            FutureCurve().GetName(GetParams().future_curve).c_str());
-    fprintf(stream, "%s}", indent.c_str());
+    params->future_variation = GetBoolean("FX_FUTURE_VARIATION", false);
   }
 
   static int GetInteger(const char* key, int default_value = 0) {
@@ -155,6 +142,10 @@ struct Params {
       return default_value;
     }
     return atoi(value);
+  }
+
+  static bool GetBoolean(const char* key, bool default_value = false) {
+    return GetInteger(key, default_value ? 1 : 0) != 0;
   }
 
   static string GetString(const char* key, const string& default_value = "") {
@@ -169,14 +160,47 @@ struct Params {
     return *MutableParams();
   }
 
+  string DebugString(const string& indent = "") const {
+    string result = "{\n";
+    for (const pair<string, string>& key_to_value : GetJsonParameters()) {
+      result += indent + "  \"" + key_to_value.first +
+                "\": \"" + key_to_value.second + "\",\n";
+    }
+    result += indent + "}";
+    return result;
+  }
+
+  string ShortDebugString() const {
+    string result = "{";
+    bool is_first = true;
+    for (const pair<string, string>& key_to_value : GetJsonParameters()) {
+      if (!is_first) { result += ","; }
+      result += "\"" + key_to_value.first +
+                "\":\"" + key_to_value.second + "\"";
+      is_first = false;
+    }
+    result += "}";
+    return result;
+  }
+
   int num_threads;
   Mode::Type mode;
   Future::Type future;
   FutureCurve::Type future_curve;
   bool daily_volatility;
   int base_volatility_interval;
+  bool future_variation;
 
  private:
+  map<string, string> GetJsonParameters() const {
+    return map<string, string>({
+        {"num_threads", StringPrintf("%d", num_threads)},
+        {"mode", Mode().GetName(mode)},
+        {"future", Future().GetName(future)},
+        {"future_curve", FutureCurve().GetName(future_curve)},
+    });
+  }
+
   static Params* MutableParams() {
     static Params params;
     return &params;
@@ -341,6 +365,13 @@ struct TimeDifference {
            time_difference <= numeric_limits<int32_t>::max());
   }
 
+  int32_t GetRawValue() const { return time_difference_; }
+  void SetRawValue(int64_t value) {
+    assert(value >= numeric_limits<int32_t>::min());
+    assert(value <= numeric_limits<int32_t>::max());
+    time_difference_ = static_cast<int32_t>(value);
+  }
+
   int32_t GetSecond() const { return time_difference_; }
 
   double GetMinute() const {
@@ -349,6 +380,10 @@ struct TimeDifference {
 
   TimeDifference operator-(TimeDifference value) const {
     return TimeDifference(time_difference_ - value.time_difference_);
+  }
+
+  bool operator<(TimeDifference value) const {
+    return GetRawValue() < value.GetRawValue();
   }
 
   string DebugString() const {
@@ -1539,8 +1574,15 @@ struct AdjustedPrice {
       case Params::Future::LIMIT: {
         Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
                                   now + max_difference);
+        // 1分以下の変動は対応ができないので，しきい値を設けない
+        // NOTE: 効果が不明のためコメントアウト
+        // if (max_difference < TimeDifference::InMinute(1.9)) {
+        //   final_price = rate.GetClosePrice();
+        //   break;
+        // }
         if (rate.GetLowPrice() < lower_bound &&
             upper_bound < rate.GetHighPrice()) {
+          final_price = rate.GetClosePrice();
           if (rate.GetClosePrice() < lower_bound) {
             final_price = lower_bound;
           } else if (upper_bound < rate.GetClosePrice()) {
@@ -1572,6 +1614,12 @@ struct AdjustedPrice {
       case Params::FutureCurve::LINEAR: {
         Init(final_price, to - now, current_price, current_volatility,
              ((to - now).GetMinute() + 1) / (max_difference.GetMinute() + 1));
+        break;
+      }
+      case Params::FutureCurve::LINEAR_CUT: {
+        Init(final_price, to - now, current_price, current_volatility,
+             ((to - now).GetMinute() - max_difference.GetMinute() + 1) /
+                 (max_difference.GetMinute() + 1));
         break;
       }
     }
@@ -1853,6 +1901,30 @@ class Feature {
 
   Feature() : weight_(0) {}
 
+  bool InitFuture(const AccumulatedRates& rates,
+                  Time now,
+                  TimeDifference difference,
+                  PriceDifference price_adjustment) {
+    if (!GetParams().future_variation) {
+      return future_.InitFuture(
+          rates, now, now + difference, price_adjustment);
+    }
+    constexpr double kRatio = pow(2.0, 0.2);
+    AdjustedPriceSum future_price_sum;
+    for (double ratio = 1 / 2.0; ratio < 2; ratio *= kRatio) {
+      AdjustedPrice future_price;
+      if (!future_price.InitFuture(
+              rates, now,
+              now + TimeDifference::InMinute(difference.GetMinute() * ratio),
+              price_adjustment)) {
+        return false;
+      }
+      future_price_sum = future_price_sum + future_price;
+    }
+    future_ = future_price_sum.GetAverage(11);
+    return true;
+  }
+
   bool Init(const FeatureConfig& config,
             const AccumulatedRates& rates,
             Time now,
@@ -1871,8 +1943,7 @@ class Feature {
       assert(past_[i].IsValid());
       last_difference = past_differnce;
     }
-    if (!future_.InitFuture(rates, now, now + config.GetFuture(ratio),
-                            price_adjustment)) {
+    if (!InitFuture(rates, now, config.GetFuture(ratio), price_adjustment)) {
       return false;
     }
     assert(future_.IsValid());
@@ -2017,6 +2088,9 @@ class Features {
     int last_percentage = 0;
     fprintf(stderr, "- Processing 0%%...\n");
 
+    TimeDifference time_step =
+        TimeDifference::InMinute(max(1, ratio_from / 2));
+
     Parallel([&](int thread_id){
       Time time;
       {
@@ -2025,7 +2099,7 @@ class Features {
         if (!(time < rates.GetEndTime())) {
           return false;
         }
-        next_time += TimeDifference::InMinute(ratio_from);
+        next_time += time_step;
       }
 
       vector<Feature> features;
@@ -2332,11 +2406,11 @@ class Correlations {
     correlation_.Add(x, y);
   }
 
-  void Commit() {
+  double Commit() {
     double weight = correlation_.GetWeight();
     CHECK(!IsNan(weight) && !IsInf(weight));
     if (weight < 1e-6) {
-      return;
+      return NAN;
     }
 
     double x = correlation_.Calculate();
@@ -2346,6 +2420,7 @@ class Correlations {
     x_sum_ += x * weight;
     xx_sum_ += x * x * weight;
     correlation_ = Correlation();
+    return x;
   }
 
   string DebugString() const {
@@ -2369,27 +2444,30 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void EvaluateFeatures() {
-    // const FeatureConfig feature_config({1, 8, 64}, 8);
-    const FeatureConfig feature_config({1, 6, 12}, 6);
+    const FeatureConfig feature_config({1, 8, 32}, 8);
+    // const FeatureConfig feature_config({1, 6, 12}, 6);
+    // const FeatureConfig feature_config({1, 12, 24}, 12);
+    // const FeatureConfig feature_config({1, 24, 48}, 24);
 
     Features clustered_features;
     {
       Features training_features;
+      // training_features.Init(feature_config, *training_rates_, 4, 64);
+      // training_features.Init(feature_config, *training_rates_, 32, 256);
       training_features.Init(feature_config, *training_rates_, 4, 64);
       // training_features.Init(feature_config, *training_rates_, 16, 64);
       clustered_features = training_features.Cluster(1000);
-      clustered_features.Print();
     }
 
     const int kRatioSize = 7;
     Correlations correlations[kRatioSize];
     for (Time next_now = test_rates_->GetStartTime();
          next_now < test_rates_->GetEndTime();) {
+      printf("%s:\n", next_now.DebugString().c_str());
       int32_t week_index = next_now.GetWeekIndex();
 
       mutex now_mutex;
       mutex correlation_mutex;
-      mutex print_mutex;
       Parallel([&](int){
         Time now;
         {
@@ -2415,32 +2493,28 @@ class Simulator {
           AdjustedPrice predicted_price = clustered_features.Predict(feature);
 
           {
-            lock_guard<mutex> correlation_mutex_guard(correlation_mutex);
             double x = log(actual_price.GetRatio());
             double y = log(predicted_price.GetRatio());
+            lock_guard<mutex> correlation_mutex_guard(correlation_mutex);
             correlations[ratio_index].Add(x, y);
-          }
-
-          if (now.GetMinuteIndex() % (24 * 60) == 0) {
-            lock_guard<mutex> print_mutex_guard(print_mutex);
-            printf("%s[% 3d]: actual: %s, predicted: %s\n",
-                   now.DebugString().c_str(),
-                   ratio,
-                   actual_price.DebugString().c_str(),
-                   predicted_price.DebugString().c_str());
           }
         }
 
         return true;
       });
       for (int ratio_index = 0; ratio_index < kRatioSize; ratio_index++) {
-        correlations[ratio_index].Commit();
-        printf("Ratio: % 3d, Correlation: %s\n",
+        printf("Ratio: % 3d, Correlation: %.4f\n",
                1 << ratio_index,
-               correlations[ratio_index].DebugString().c_str());
+               correlations[ratio_index].Commit());
       }
     }
 
+    printf("Final commit:\n");
+    for (int ratio_index = 0; ratio_index < kRatioSize; ratio_index++) {
+      printf("Ratio: % 3d, Correlation: %s\n",
+             1 << ratio_index,
+             correlations[ratio_index].DebugString().c_str());
+    }
   }
 
   AdjustedPrice Predict(const Features& model,
@@ -2607,6 +2681,8 @@ void Test() {
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
   google::InstallFailureSignalHandler();
+  FLAGS_alsologtostderr =
+      static_cast<bool>(Params::GetInteger("FX_ALSOLOGTOSTDERR"));
 
   if (argc < 2) {
     fprintf(stderr, "Usage: %s training evaluation\n", argv[0]);
@@ -2614,7 +2690,7 @@ int main(int argc, char** argv) {
   }
 
   Params::Init();
-  Params::Print();
+  LOG(INFO) << "Parameters: " << GetParams().ShortDebugString();
   fprintf(stderr, "\n");
 
 #ifdef NDEBUG
