@@ -8,6 +8,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <future>
 #include <map>
 #include <mutex>
 #include <numeric>
@@ -20,8 +21,6 @@ using namespace std;
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
 const double kHighAndLowDistanceWeight = 1;
-// スプレッド
-const double kTradeSpread = 0.29 / 10000; // 0.58 / 12000;
 // 予測に用いる過去の指標の割合（0.05程度が目安）
 const double kPredictRatio = 0.01;
 
@@ -134,6 +133,7 @@ struct Params {
     params->base_volatility_interval =
         GetInteger("FX_BASE_VOLATILITY_INTERVAL", 24 * 60);
     params->future_variation = GetBoolean("FX_FUTURE_VARIATION", false);
+    params->spread = GetFloat("FX_SPREAD", 0.29 / 10000);
   }
 
   static int GetInteger(const char* key, int default_value = 0) {
@@ -142,6 +142,14 @@ struct Params {
       return default_value;
     }
     return atoi(value);
+  }
+
+  static float GetFloat(const char* key, float default_value = 0) {
+    char* value = getenv(key);
+    if (value == nullptr) {
+      return default_value;
+    }
+    return atof(value);
   }
 
   static bool GetBoolean(const char* key, bool default_value = false) {
@@ -190,6 +198,7 @@ struct Params {
   bool daily_volatility;
   int base_volatility_interval;
   bool future_variation;
+  float spread;
 
  private:
   map<string, string> GetJsonParameters() const {
@@ -1909,8 +1918,9 @@ class Feature {
       return future_.InitFuture(
           rates, now, now + difference, price_adjustment);
     }
-    constexpr double kRatio = pow(2.0, 0.2);
+    const double kRatio = pow(2.0, 0.2);
     AdjustedPriceSum future_price_sum;
+    int count = 0;
     for (double ratio = 1 / 2.0; ratio < 2; ratio *= kRatio) {
       AdjustedPrice future_price;
       if (!future_price.InitFuture(
@@ -1920,8 +1930,9 @@ class Feature {
         return false;
       }
       future_price_sum = future_price_sum + future_price;
+      count++;
     }
-    future_ = future_price_sum.GetAverage(11);
+    future_ = future_price_sum.GetAverage(count);
     return true;
   }
 
@@ -2164,6 +2175,7 @@ class Features {
   vector<Feature>::const_iterator begin() const { return features_.begin(); }
   vector<Feature>::const_iterator end() const { return features_.end(); }
 
+  const FeatureConfig& GetFeatureConfig() const { return config_; }
   const AdjustedPriceStat& GetFutureStat() const { return future_stat_; }
 
   Features Cluster(int size) const {
@@ -2303,14 +2315,16 @@ struct Asset {
             trade_(0.0),
             total_fee_(0.0) {}
 
-  void Trade(Price current_price, double leverage, double spread = 0.0) {
+  void Trade(Price current_price, double leverage, bool use_spread = false) {
     double value = GetValue(current_price);
     double last_currency = currency_;
     foreign_currency_ = value * leverage / current_price.GetRealPrice();
     currency_ = value - foreign_currency_ * current_price.GetRealPrice();
-    double fee = fabs(last_currency - currency_) * spread / 2;
-    currency_ -= fee;
-    total_fee_ += fee;
+    if (use_spread) {
+      double fee = fabs(last_currency - currency_) * GetParams().spread / 2;
+      currency_ -= fee;
+      total_fee_ += fee;
+    }
     trade_ += fabs(last_currency - currency_);
   }
 
@@ -2588,7 +2602,7 @@ class Simulator {
     return position;
   }
 
-  void Simulate() {
+  void SimulateDiscrete() {
 //    FeatureConfig feature_config({1, 8, 64}, 8);
     FeatureConfig feature_config({1, 8, 64}, 8);
     Features model = GenerateModel(feature_config, 4, 32);
@@ -2606,7 +2620,7 @@ class Simulator {
       if (!test_rates_->GetRate(
               now + TimeDifference::InMinute(1),
               now + TimeDifference::InMinute(1)).GetClosePrice().IsValid()) {
-        asset.Trade(current_price, 0, kTradeSpread);
+        asset.Trade(current_price, 0, true /* use_spread */);
         printf("%s: %s:\n",
                now.DebugString().c_str(),
                test_rates_->GetRate(now, now)
@@ -2646,7 +2660,7 @@ class Simulator {
         continue;
       }
 
-      asset.Trade(current_price, target_position, kTradeSpread);
+      asset.Trade(current_price, target_position, true /* use_spread */);
 
       printf("%s: %s:\n",
              now.DebugString().c_str(),
@@ -2659,6 +2673,124 @@ class Simulator {
              asset.GetLeverage(current_price),
              asset.GetTotalFee());
     }
+  }
+
+  struct TradeState {
+    Asset base_asset;
+    Asset asset;
+    string output;
+  };
+
+  TradeState ProcessTick(
+      Time now, const Features& model, future<TradeState> current_state) {
+    Price current_price = test_rates_->GetRate(now, now).GetClosePrice();
+    if (!current_price.IsValid()) {
+      return current_state.get();
+    }
+
+    // 次の時刻の価格が存在しなければ強制決済
+    if (!test_rates_->GetRate(
+            now + TimeDifference::InMinute(1),
+            now + TimeDifference::InMinute(1)).GetClosePrice().IsValid()) {
+      TradeState state = current_state.get();
+      state.base_asset.Trade(current_price, 0.5);
+      state.asset.Trade(current_price, 0, true /* use_spread */);
+      return state;
+    }
+
+    double minimal_leverage = NAN;
+    double maximal_leverage = NAN;
+    double target_leverage = NAN;
+    for (int adjustment = -5; adjustment <= 5; adjustment++) {
+      double leverage_sum = 0.0;
+      int failure = 0, success = 0;
+      for (double ratio = 8; ratio < 32.001; ratio *= sqrt(2)) {
+        Feature current_feature;
+        if (!current_feature.Init(
+                model.GetFeatureConfig(),
+                *test_rates_, now, static_cast<int>(round(ratio)),
+                PriceDifference::InRatio(1.00004) * adjustment)) {
+          failure++;
+          continue;
+        }
+        success++;
+
+        AdjustedPrice predicted_aprice = model.Predict(current_feature);
+        leverage_sum += -log(predicted_aprice.GetRatio());
+      }
+      double leverage = leverage_sum * 5000 / (failure + success);
+      if (failure > success) {
+        leverage = 0;
+        // leverage_ratio = 1.0;
+      }
+      if (IsNan(minimal_leverage) || leverage < minimal_leverage) {
+        minimal_leverage = leverage;
+      }
+      if (IsNan(maximal_leverage) || leverage > maximal_leverage) {
+        maximal_leverage = leverage;
+      }
+      if (adjustment == 0) {
+        target_leverage = leverage;
+      }
+    }
+
+    TradeState state = current_state.get();
+    double current_leverage = state.asset.GetLeverage(current_price);
+    state.base_asset.Trade(current_price, 0.5);
+    double leverage = target_leverage;
+    leverage = max(-1.0, min(1.0, leverage));
+    state.asset.Trade(current_price, leverage, true /* use_spread */);
+    state.output = StringPrintf(
+        "%.5f[%.3f] (%.3f => %.3f)",
+        state.asset.GetValue(current_price),
+        state.asset.GetTotalFee(),
+        current_leverage,
+        state.asset.GetLeverage(current_price));
+    return state;
+  }
+
+  void Simulate() {
+    FeatureConfig feature_config({1, 8, 32}, 8);
+    Features model = GenerateModel(feature_config, 4, 64);
+
+    Time next_now = test_rates_->GetStartTime();
+    promise<TradeState> initial_state;
+    future<TradeState> next_state = initial_state.get_future();
+    initial_state.set_value(TradeState());
+
+    mutex now_mutex;
+    mutex correlation_mutex;
+    Parallel([&](int){
+      Time now;
+      Price current_price;
+      future<TradeState> current_state;
+      promise<TradeState> promised_state;
+      {
+        lock_guard<mutex> now_mutex_guard(now_mutex);
+        do {
+          now = next_now;
+          if (!(now < test_rates_->GetEndTime())) {
+            return false;
+          }
+          next_now.AddMinute(1);
+          current_price = test_rates_->GetRate(now, now).GetClosePrice();
+        } while (!current_price.IsValid());
+        current_state = std::move(next_state);
+        next_state = promised_state.get_future();
+      }
+
+      TradeState state = ProcessTick(now, model, std::move(current_state));
+      if (now.GetWeeklyIndex() % 60 == 0) {
+        printf("%s: %s: %s\n",
+               now.DebugString().c_str(),
+               current_price.DebugString().c_str(),
+               state.output.c_str());
+      }
+      state.output.clear();
+      promised_state.set_value(state);
+
+      return true;
+    });
   }
 
  private:

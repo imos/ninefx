@@ -13,6 +13,7 @@ DEFINE_enum --values='FLAT,SQRT,LINEAR,LINEAR_CUT' 'future_curve' 'LINEAR' \
 DEFINE_bool 'daily_volatility' false 'Use daily volatility.'
 DEFINE_int 'base_volatility_interval' 1440 'Interval for base volatility.'
 DEFINE_bool 'future_variation' false 'Variation of future.'
+DEFINE_string 'spread' 0.000029 'Use spread.'
 
 DEFINE_list 'training' '2011' 'Years for training.'
 DEFINE_list 'test' '2012' 'Years for evaluation.'
@@ -54,6 +55,7 @@ export FX_BASE_VOLATILITY_INTERVAL="${FLAGS_base_volatility_interval}"
 if (( FLAGS_future_variation )); then
   export FX_FUTURE_VARIATION="${FLAGS_future_variation}"
 fi
+export FX_SPREAD="${FLAGS_spread}"
 
 LOG INFO 'Executing...'
 commands=("./bin/${FLAGS_target}")

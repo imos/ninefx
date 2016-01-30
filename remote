@@ -1,7 +1,5 @@
 #!/bin/bash
 
-REMOTE_HOST=54.238.191.237
-
 source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
 
 rsync -az --delete -e "ssh -i ${HOME}/.ssh/ec2-tokyo.pem" ./ "ec2-user@${REMOTE_HOST}":~/ninefx
