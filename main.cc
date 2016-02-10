@@ -73,6 +73,12 @@ vector<string> Split(const string& str, char delimiter) {
   return res;
 }
 
+template<class T, class X = decltype(T().DebugString())>
+ostream& operator<<(ostream& os, const T& value) {
+  os << value.DebugString();
+  return os;
+}
+
 class EnumType {
  public:
   EnumType(const string& candidates) {
@@ -119,7 +125,7 @@ class EnumType {
 
 struct Params {
  public:
-  REGISTER_ENUM(Mode, SIMULATE, EVALUATE);
+  REGISTER_ENUM(Mode, SIMULATE, EVALUATE, QLEARN);
   REGISTER_ENUM(Future, CLOSE, CROSS, LIMIT);
   REGISTER_ENUM(FutureCurve, FLAT, SQRT, LINEAR, LINEAR_CUT);
 
@@ -483,6 +489,12 @@ struct Time {
     return time_ < value.time_;
   }
 
+  bool operator<=(Time value) const {
+    assert(IsValid());
+    assert(value.IsValid());
+    return time_ <= value.time_;
+  }
+
   TimeDifference operator-(Time base_time) const {
     return TimeDifference((int64_t)time_ - (int64_t)base_time.time_);
   }
@@ -604,6 +616,12 @@ struct Time {
     return false;
   }
 
+  static Time Invalid() {
+    Time time;
+    CHECK(!time.IsValid());
+    return time;
+  }
+
  private:
   explicit Time(int64_t second) { SetSecond(second); }
 
@@ -626,6 +644,66 @@ struct Time {
 
 typedef Sum<Time> TimeSum;
 
+// [start_time, end_time) の時間を 1 分単位でイテレートします．
+class TimeIterator {
+ public:
+  TimeIterator(Time start_time, Time end_time, bool show_progress)
+      : start_time_(start_time),
+        end_time_(end_time),
+        next_time_(start_time),
+        show_progress_(show_progress) {
+    CHECK(start_time_.IsValid());
+    CHECK(end_time_.IsValid());
+    CHECK_LE(start_time_, end_time_);
+    if (show_progress_) {
+      fprintf(stderr, "- Processing 0%%...\n");
+    }
+  }
+
+  size_t Count() const {
+    return end_time_.GetMinuteIndex() - start_time_.GetMinuteIndex();
+  }
+
+  int GetPercentage(Time time) const {
+    return 100 * (time.GetMinuteIndex() - start_time_.GetMinuteIndex())
+           / (end_time_.GetMinuteIndex() - start_time_.GetMinuteIndex());
+  }
+
+  Time GetAndIncrement() {
+    Time time;
+    {
+      lock_guard<mutex> mutex_guard_(mutex);
+      time = next_time_;
+      if (!(time < end_time_)) {
+        time = Time::Invalid();
+      }
+      next_time_.AddMinute(1);
+    }
+    if (show_progress_) {
+      if (time.IsValid()) {
+        int percentage = GetPercentage(time);
+        if (percentage !=
+            GetPercentage(time - TimeDifference::InMinute(1))) {
+          fprintf(stderr,
+                  CLEAR_LINE "- Processing %d%%...\n",
+                  percentage);
+        }
+      } else {
+        fprintf(stderr, CLEAR_LINE "Successfully processed.\n");
+        show_progress_ = false;
+      }
+    }
+    return time;
+  }
+
+ private:
+  Time start_time_;
+  Time end_time_;
+  mutex mutex_;
+  Time next_time_;
+  bool show_progress_;
+};
+
 struct PriceDifference {
  public:
   static constexpr double kLogPriceRatio = 1.0e8;
@@ -644,6 +722,31 @@ struct PriceDifference {
     PriceDifference result;
     result.SetRawValue(GetRawValue() * ratio);
     return result;
+  }
+
+  PriceDifference operator+(PriceDifference value) const {
+    PriceDifference result;
+    result.SetRawValue(GetRawValue() + value.GetRawValue());
+    return result;
+  }
+
+  bool operator<(PriceDifference value) const {
+    return log_price_ < value.log_price_;
+  }
+
+  double GetLogValue() const {
+    return log_price_ / kLogPriceRatio;
+  }
+
+  void SetLogValue(double log_price) {
+    double value = log_price * kLogPriceRatio;
+    CHECK_GE(value, numeric_limits<int32_t>::min());
+    CHECK_LE(value, numeric_limits<int32_t>::max());
+    log_price_ = static_cast<int32_t>(round(value));
+  }
+
+  string DebugString() const {
+    return StringPrintf("%+.4f", GetLogValue());
   }
 
   static PriceDifference InRatio(double ratio) {
@@ -695,6 +798,15 @@ struct Price {
 
     Price result;
     result.SetRawValue(GetRawValue() - price_difference.GetRawValue());
+    return result;
+  }
+
+  PriceDifference operator-(Price value) const {
+    CHECK(IsValid());
+    CHECK(value.IsValid());
+
+    PriceDifference result;
+    result.SetRawValue(GetRawValue() - value.GetRawValue());
     return result;
   }
 
@@ -765,6 +877,45 @@ struct Price {
 
 typedef Sum<Price> PriceSum;
 
+struct Asset {
+ public:
+  Asset() : currency_(1.0),
+            foreign_currency_(0.0),
+            trade_(0.0),
+            total_fee_(0.0) {}
+
+  void Trade(Price current_price, double leverage, bool use_spread = false) {
+    double value = GetValue(current_price);
+    double last_currency = currency_;
+    foreign_currency_ = value * leverage / current_price.GetRealPrice();
+    currency_ = value - foreign_currency_ * current_price.GetRealPrice();
+    if (use_spread) {
+      double fee = fabs(last_currency - currency_) * GetParams().spread / 2;
+      currency_ -= fee;
+      total_fee_ += fee;
+    }
+    trade_ += fabs(last_currency - currency_);
+  }
+
+  double GetValue(Price current_price) const {
+    return currency_ + current_price.GetRealPrice() * foreign_currency_;
+  }
+
+  double GetTotalFee() const { return total_fee_; }
+
+  double GetTotalTrade() const { return trade_; }
+
+  double GetLeverage(Price current_price) const {
+    return 1 - currency_ / GetValue(current_price);
+  }
+
+ private:
+  double currency_;
+  double foreign_currency_;
+  double trade_;
+  double total_fee_;
+};
+
 struct VolatilityRatio {
  public:
   VolatilityRatio() : ratio_(1.0) {}
@@ -796,7 +947,7 @@ struct Volatility {
   }
 
   Volatility operator*(VolatilityRatio ratio) const {
-    return Volatility(GetValue() * ratio.GetValue());
+    return Volatility(GetValue() * ratio.GetValue() * ratio.GetValue());
   }
 
   bool IsValid() const {
@@ -1314,6 +1465,9 @@ class AccumulatedRates {
   }
 
   Volatility GetVolatility(Time to) const {
+    if (GetParams().base_volatility_interval == 0) {
+      return Volatility::InRatio(1.0002);
+    }
     Time from = to - TimeDifference::InMinute(
         GetParams().base_volatility_interval);
 
@@ -1777,7 +1931,7 @@ struct AdjustedRate {
     Volatility current_volatility = rates.GetVolatility(now);
     if (!current_volatility.IsValid()) { return false; }
 
-    if (rates.Count(from, to) < ((to - from).GetMinute() + 1) * 0.7) {
+    if (rates.Count(from, to) < (fabs((to - from).GetMinute()) + 1) * 0.7) {
       return false;
     }
     Rate rate = rates.GetRate(from, to);
@@ -1904,6 +2058,493 @@ struct FeatureConfig {
   int future_;
 };
 
+struct PastFeature {
+ public:
+  static constexpr size_t kFeatureSize = FeatureConfig::kFeatureSize;
+
+  bool Init(const FeatureConfig& config,
+            const AccumulatedRates& rates,
+            Time now,
+            int ratio,
+            PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
+    TimeDifference last_difference = TimeDifference::InMinute(0);
+    for (size_t i = 0; i < config.GetPastSize(); i++) {
+      TimeDifference past_differnce = config.GetPast((int)i, ratio);
+      if (!past_[i].Init(rates,
+                         now - past_differnce,
+                         now - last_difference - TimeDifference::InMinute(1),
+                         now,
+                         price_adjustment)) {
+        return false;
+      }
+      CHECK(past_[i].IsValid())
+          << "past_[" << i << "] is invalid: "
+          << "now=" << now.DebugString() << ", "
+          << "price_adjustment=" << price_adjustment.GetRawValue();
+      last_difference = past_differnce;
+    }
+    return true;
+  }
+
+  double MeasureDistance(const FeatureConfig& config,
+                         const PastFeature& feature) const {
+    double distance = 0.0;
+    for (size_t i = 0; i < config.GetPastSize(); i++) {
+      DCHECK(past_[i].IsValid());
+      DCHECK(feature.past_[i].IsValid());
+      distance += past_[i].MeasureDistance(feature.past_[i]);
+    }
+    return distance;
+  }
+
+  string DebugString(const string& indent) const {
+    string result = "[\n";
+    for (size_t i = 0; i < kFeatureSize; i++) {
+      result += indent + "  " + past_[i].DebugString() + ",\n";
+    }
+    result += indent + "]";
+    return result;
+  }
+
+  const AdjustedRate& GetPastRate(int index) const {
+    CHECK_GE(0, index);
+    CHECK_GT(index, kFeatureSize);
+    return past_[index];
+  }
+
+  AdjustedRate* MutablePastRate(int index) {
+    CHECK_GE(0, index);
+    CHECK_GT(index, kFeatureSize);
+    return &past_[index];
+  }
+
+ private:
+  AdjustedRate past_[kFeatureSize];
+};
+
+struct QFeatureScore {
+ public:
+  QFeatureScore()
+      : score_(0),
+        volatility_score_(0) {
+    Begin();
+  }
+
+  void Begin() {
+    x_.clear(); y_.clear();
+    xy_sum_ = 0;
+    xx_sum_ = 0;
+    x_sum_ = 0;
+    y_sum_ = 0;
+    sum_ = 0;
+  }
+
+  PriceDifference GetScore(Volatility volatility) {
+    PriceDifference result;
+    double score = score_ + volatility_score_ * sqrt(volatility.GetValue());
+    CHECK(!IsNan(score) && !IsInf(score))
+        << "Invalid score: " << score << ", " << DebugString();
+    CHECK_GE(score * PriceDifference::kLogPriceRatio,
+             numeric_limits<int32_t>::min())
+        << "Invalid score: " << score << ", " << DebugString();
+    CHECK_LE(score * PriceDifference::kLogPriceRatio,
+             numeric_limits<int32_t>::max())
+        << "Invalid score: " << score << ", " << DebugString();
+    result.SetLogValue(score);
+    return result;
+  }
+
+  void Commit(double learning_rate = 0.1) {
+    if (sum_ < 2.001) {
+      LOG(ERROR) << "Bad commit.";
+      Begin();
+      return;
+    }
+
+    double covariance = xy_sum_ / sum_ - x_sum_ / sum_ * y_sum_ / sum_;
+    double variance = xx_sum_ / sum_ - x_sum_ / sum_ * x_sum_ / sum_;
+    CHECK(!IsNan(covariance) && !IsInf(covariance))
+        << "Invalid covariance: " << covariance << ", "
+        << DebugString();
+
+    double volatility_score = covariance / variance;
+    volatility_score = min(1.0 / 5000, max(-1.0 / 5000, volatility_score));
+    volatility_score *= 0.8;
+    double score = y_sum_ / sum_ - x_sum_ / sum_ * volatility_score;
+    CHECK(!IsNan(volatility_score) && !IsInf(volatility_score))
+        << "Invalid volatility_score: " << volatility_score
+        << ", " << DebugString();
+    CHECK(!IsNan(score) && !IsInf(score))
+        << "Invalid score: " << score << ", " << DebugString();
+    if (numeric_limits<int32_t>::max() <
+        score * PriceDifference::kLogPriceRatio) {
+      LOG(INFO) << "covariance=" << covariance;
+      LOG(INFO) << "variance=" << variance;
+      LOG(INFO) << "volatility_score=" << volatility_score;
+      LOG(INFO) << "score=" << score;
+      for (size_t i = 0; i < x_.size(); i++) {
+        LOG(INFO) << "x=" << x_[i] << ", " << y_[i];
+      }
+    }
+    CHECK_LE(score * PriceDifference::kLogPriceRatio,
+             numeric_limits<int32_t>::max())
+        << "Invalid score: " << score << ", " << DebugString();
+
+    score_ = score_ * (1 - learning_rate) + score * learning_rate;
+    volatility_score_ = volatility_score_ * (1 - learning_rate) +
+                        volatility_score * learning_rate;
+    CHECK(!IsNan(score_) && !IsInf(score_)) << DebugString();
+    CHECK(!IsNan(volatility_score_) && !IsInf(volatility_score_))
+        << DebugString();
+
+    Begin();
+  }
+
+  void Record(Volatility volatility, PriceDifference reward) {
+    CHECK(volatility.IsValid())
+        << "Invalid volatility: " << volatility.DebugString();
+    // CHECK(reward.IsValid()) << "Invalid reward: " << reward.DebugString();
+
+    const double kDiscountFactor = 0.99;
+    double x = sqrt(volatility.GetValue());
+    double y = reward.GetLogValue() * kDiscountFactor;
+    // x_.push_back(x);
+    // y_.push_back(y);
+    xy_sum_ += x * y;
+    xx_sum_ += x * x;
+    x_sum_ += x;
+    y_sum_ += y;
+    sum_ += 1;
+  }
+
+  string DebugString() const {
+    return "{\"score\": " + StringPrintf("%g", score_) + ", " +
+           "\"volatility_score\": " +
+           StringPrintf("%g", volatility_score_) + ", " +
+           "\"xy_sum\": " + StringPrintf("%g", xy_sum_) + ", " +
+           "\"xx_sum\": " + StringPrintf("%g", xx_sum_) + ", " +
+           "\"x_sum\": " + StringPrintf("%g", x_sum_) + ", " +
+           "\"y_sum\": " + StringPrintf("%g", y_sum_) + ", " +
+           "\"sum\": " + StringPrintf("%g", sum_) + "}";
+  }
+
+ private:
+  double score_;
+  double volatility_score_;
+
+  vector<double> x_, y_;
+  double xy_sum_;
+  double xx_sum_;
+  double x_sum_;
+  double y_sum_;
+  double sum_;
+};
+
+struct QFeature {
+ public:
+  QFeature() {}
+
+  bool Init(const FeatureConfig& config,
+            const AccumulatedRates& rates,
+            Time now,
+            int ratio) {
+    return past_.Init(config, rates, now, ratio);
+  }
+
+  double MeasureDistance(const FeatureConfig& config,
+                         const QFeature& feature) const {
+    return past_.MeasureDistance(config, feature.past_);
+  }
+
+  QFeatureScore* MutableQFeatureScore(int index) {
+    CHECK_LE(-1, index);
+    CHECK_LE(index, 1);
+    return &score_[index + 1];
+  }
+
+ private:
+  PastFeature past_;
+  QFeatureScore score_[3];
+};
+
+struct QFeatureReward {
+ public:
+  QFeatureReward() : feature_id_(-1) {}
+
+  bool Init(const vector<QFeature>& features,
+            const FeatureConfig& config,
+            const AccumulatedRates& rates,
+            Time now,
+            int ratio) {
+    now_ = now;
+    volatility_ = rates.GetVolatility(now);
+    if (!volatility_.IsValid()) {
+      return false;
+    }
+
+    QFeature feature;
+    if (!feature.Init(config, rates, now, ratio)) {
+      return false;
+    }
+
+    Price current_price = rates.GetRate(now, now).GetClosePrice();
+    if (!current_price.IsValid()) {
+      return false;
+    }
+    price_ = current_price;
+
+    Time next_time = now + TimeDifference::InMinute(1);
+    Price next_price = rates.GetRate(next_time, next_time).GetClosePrice();
+    if (!next_price.IsValid()) {
+      return false;
+    }
+    reward_ = next_price - current_price;
+
+    int min_feature_id = -1;
+    double min_distance = NAN;
+    for (int feature_id = 0; feature_id < (int)features.size(); feature_id++) {
+      double distance =
+          features[feature_id].MeasureDistance(config, feature);
+      if (IsNan(min_distance) || distance < min_distance) {
+        min_distance = distance;
+        min_feature_id = feature_id;
+      }
+    }
+    feature_id_ = min_feature_id;
+    return true;
+  }
+
+  bool IsValid() const {
+    return feature_id_ >= 0;
+  }
+
+  Time GetTime() const { return now_; }
+  Price GetPrice() const { return price_; }
+  int GetFeatureId() const { return feature_id_; }
+  PriceDifference GetReward() const { return reward_; }
+  Volatility GetVolatility() const { return volatility_; }
+
+ private:
+  Time now_;
+  Price price_;
+  int feature_id_;
+  PriceDifference reward_;
+  Volatility volatility_;
+};
+
+class QFeatures {
+ public:
+  QFeatures() {}
+  QFeatures(const vector<QFeature>& features,
+            const FeatureConfig& config,
+            const string& name)
+      : name_(name), config_(config), features_(features) {
+    fprintf(stderr, "QFeatures for %s\n", name_.c_str());
+  }
+
+  void Init(const FeatureConfig& config,
+            const AccumulatedRates& rates,
+            int ratio,
+            int ratio_range) {
+    name_ = rates.GetName();
+    config_ = config;
+    fprintf(stderr, "Generating Q-features for %s...\n", name_.c_str());
+
+    while (features_.size() < 100) {
+      TimeDifference time_interval = rates.GetEndTime() - rates.GetStartTime();
+      Time time = rates.GetStartTime() +
+          TimeDifference::InMinute(
+              static_cast<int32_t>(Rand() % (time_interval.GetSecond() / 60)));
+      QFeature feature;
+      if (feature.Init(config, rates, time, ratio)) {
+        features_.push_back(feature);
+      }
+    }
+    fprintf(stderr, "- # of features for %s is %lu.\n",
+            rates.GetName().c_str(), features_.size());
+
+    vector<int> ratios;
+    for (int r = ratio - ratio_range; r <= ratio + ratio_range; r += 2) {
+      ratios.push_back(r);
+    }
+    TimeIterator iterator(
+        rates.GetStartTime(), rates.GetEndTime(), true /* show_progress */);
+    rewards_.resize(iterator.Count() * ratios.size(), QFeatureReward());
+    Parallel([&](int){
+      Time time = iterator.GetAndIncrement();
+      if (!time.IsValid()) { return false; }
+      for (size_t ratio_index = 0; ratio_index < ratios.size(); ratio_index++) {
+        rewards_[
+            (time.GetMinuteIndex() - rates.GetStartTime().GetMinuteIndex()) *
+            ratios.size() + ratio_index]
+          .Init(features_, config, rates, time, ratios[ratio_index]);
+      }
+      return true;
+    });
+
+    LOG(INFO) << "Q-features for " << name_ << " is initialized.";
+  }
+
+  size_t size() const { return features_.size(); }
+  vector<QFeature>::const_iterator begin() const { return features_.begin(); }
+  vector<QFeature>::const_iterator end() const { return features_.end(); }
+
+  const FeatureConfig& GetFeatureConfig() const { return config_; }
+
+  void Replay() {
+    int leverage = 0;
+    Asset asset;
+    for (size_t reward_index = 0; reward_index + 1 < rewards_.size();
+         reward_index++) {
+      const QFeatureReward& reward = rewards_[reward_index];
+      const QFeatureReward& next_reward = rewards_[reward_index + 1];
+      if (!reward.IsValid()) {
+        continue;
+      }
+      if (!next_reward.IsValid()) {
+        LOG(INFO) << reward.GetTime().DebugString() << ": "
+                  << reward.GetPrice().DebugString() << ": "
+                  << StringPrintf("%.6f", asset.GetValue(reward.GetPrice()))
+                  << ": settlement.";
+        leverage = 0;
+        asset.Trade(reward.GetPrice(), 0, true);
+        continue;
+      }
+      QFeature* feature = &features_[reward.GetFeatureId()];
+      PriceDifference best_score = PriceDifference::InRatio(1);
+      int best_leverage = 0;
+      for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+        PriceDifference score =
+            feature->MutableQFeatureScore(leverage_to)
+                   ->GetScore(reward.GetVolatility()) +
+            PriceDifference::InRatio(1 - GetParams().spread) *
+            (abs(leverage_to - leverage));
+        if (best_score < score) {
+          best_score = score;
+          best_leverage = leverage_to;
+        }
+      }
+      if (leverage != best_leverage) {
+        LOG(INFO) << reward.GetTime().DebugString() << ": "
+                  << reward.GetPrice().DebugString() << ": "
+                  << StringPrintf("%.6f", asset.GetValue(reward.GetPrice()))
+                  << StringPrintf(": %+d => %+d", leverage, best_leverage)
+                  << StringPrintf(": %+.6f", best_score.GetLogValue());
+      }
+      leverage = best_leverage;
+      asset.Trade(reward.GetPrice(), best_leverage, true);
+    }
+  }
+
+  void Simulate(const AccumulatedRates& rates,
+                int ratio) {
+    int leverage = 0;
+    Asset asset;
+    Price last_price;
+    for (Time now = rates.GetStartTime(); now < rates.GetEndTime();
+         now.AddMinute(1)) {
+      Price current_price = rates.GetRate(now, now).GetClosePrice();
+      // 最初に有効な価格が設定されるまでは何もしない
+      if (!last_price.IsValid()) {
+        if (current_price.IsValid()) {
+          last_price = current_price;
+        }
+        continue;
+      }
+      CHECK(last_price.IsValid()) << last_price;
+
+      // 現在の特徴量を生成する
+      QFeature feature;
+      Volatility volatility = rates.GetVolatility(now);
+      if (!feature.Init(config_, rates, now, ratio) ||
+          !volatility.IsValid() ||
+          !current_price.IsValid()) {
+        asset.Trade(last_price, 0, true);
+        continue;
+      }
+      last_price = current_price;
+      CHECK(current_price.IsValid()) << current_price;
+
+      PriceDifference best_score = PriceDifference::InRatio(1);
+      int best_leverage = 0;
+      for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+        int min_feature_id = -1;
+        double min_distance = NAN;
+        for (int feature_id = 0; feature_id < (int)features_.size();
+             feature_id++) {
+          double distance =
+              features_[feature_id].MeasureDistance(config_, feature);
+          if (IsNan(min_distance) || distance < min_distance) {
+            min_distance = distance;
+            min_feature_id = feature_id;
+          }
+        }
+        QFeature& predicted_feature = features_[min_feature_id];
+        PriceDifference score =
+            predicted_feature.MutableQFeatureScore(leverage_to)
+                             ->GetScore(volatility) +
+            PriceDifference::InRatio(1 - GetParams().spread) *
+            (abs(leverage_to - leverage) * abs(leverage_to) * 1.5);
+        if (best_score < score) {
+          best_score = score;
+          best_leverage = leverage_to;
+        }
+      }
+      if (leverage != best_leverage) {
+        LOG(INFO) << now.DebugString() << ": "
+                  << current_price.DebugString() << ": "
+                  << StringPrintf("%.6f", asset.GetValue(current_price))
+                  << StringPrintf(": %+d => %+d", leverage, best_leverage)
+                  << StringPrintf(": %+.6f", best_score.GetLogValue());
+      }
+      leverage = best_leverage;
+      asset.Trade(current_price, best_leverage, true);
+    }
+  }
+
+  void Learn(double learning_rate) {
+    for (size_t reward_index = 0; reward_index + 1 < rewards_.size();
+         reward_index++) {
+      const QFeatureReward& reward = rewards_[reward_index];
+      const QFeatureReward& next_reward = rewards_[reward_index + 1];
+      if (!reward.IsValid() || !next_reward.IsValid()) { continue; }
+      QFeature* feature = &features_[reward.GetFeatureId()];
+      QFeature* next_feature = &features_[next_reward.GetFeatureId()];
+      for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
+        // PriceDifference best_score =
+        //     next_feature->MutableQFeatureScore(leverage_from)
+        //                 ->GetScore(next_reward.GetVolatility()) +
+        //     reward.GetReward() * leverage_from;
+        PriceDifference best_score;
+        for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+          PriceDifference score =
+              next_feature->MutableQFeatureScore(leverage_to)
+                          ->GetScore(next_reward.GetVolatility()) +
+              PriceDifference::InRatio(1 - GetParams().spread) *
+              abs(leverage_to - leverage_from) * 40 +
+              reward.GetReward() * leverage_to;
+          if (leverage_to == -1 || best_score < score) {
+            best_score = score;
+          }
+        }
+        feature->MutableQFeatureScore(leverage_from)
+               ->Record(reward.GetVolatility(), best_score);
+      }
+    }
+    for (QFeature& feature : features_) {
+      for (int leverage = -1; leverage <= 1; leverage++) {
+        feature.MutableQFeatureScore(leverage)->Commit(learning_rate);
+      }
+    }
+  }
+
+ private:
+  string name_;
+  FeatureConfig config_;
+  vector<QFeature> features_;
+  vector<QFeatureReward> rewards_;
+};
+
 class Feature {
  public:
   static constexpr size_t kFeatureSize = FeatureConfig::kFeatureSize;
@@ -1941,19 +2582,7 @@ class Feature {
             Time now,
             int ratio,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
-    TimeDifference last_difference = TimeDifference::InMinute(0);
-    for (size_t i = 0; i < config.GetPastSize(); i++) {
-      TimeDifference past_differnce = config.GetPast((int)i, ratio);
-      if (!past_[i].Init(rates,
-                         now - past_differnce,
-                         now - last_difference - TimeDifference::InMinute(1),
-                         now,
-                         price_adjustment)) {
-        return false;
-      }
-      assert(past_[i].IsValid());
-      last_difference = past_differnce;
-    }
+    past_.Init(config, rates, now, ratio, price_adjustment);
     if (!InitFuture(rates, now, config.GetFuture(ratio), price_adjustment)) {
       return false;
     }
@@ -1964,26 +2593,20 @@ class Feature {
 
   double MeasureDistance(const FeatureConfig& config,
                          const Feature& feature) const {
-    double distance = 0.0;
-    for (size_t i = 0; i < config.GetPastSize(); i++) {
-      DCHECK(past_[i].IsValid());
-      DCHECK(feature.past_[i].IsValid());
-      distance += past_[i].MeasureDistance(feature.past_[i]);
-    }
-    return distance;
+    return past_.MeasureDistance(config, feature.past_);
   }
 
+  const PastFeature& GetPastFeature() const { return past_; }
   const AdjustedPrice& GetFuturePrice() const { return future_; }
   int32_t GetWeight() const { return weight_; }
+
+  PastFeature* MutablePastFeature() { return &past_; }
 
   void ClearFuturePrice() { future_.Clear(); }
 
   string DebugString(const string& indent) const {
-    string result = "feature: {\n" + indent + "  past: [\n";
-    for (size_t i = 0; i < kFeatureSize; i++) {
-      result += indent + "    " + past_[i].DebugString() + ",\n";
-    }
-    result += indent + "  ],\n";
+    string result = "feature: {\n" + indent + "  past: ";
+    result += past_.DebugString(indent + "  ") + ",\n";
     result += indent + "  future: " + future_.DebugString() + ",\n";
     result += indent + "  weight: ";
 
@@ -1996,7 +2619,7 @@ class Feature {
   }
 
  private:
-  AdjustedRate past_[kFeatureSize];
+  PastFeature past_;
   AdjustedPrice future_;
   int32_t weight_;
 
@@ -2010,7 +2633,7 @@ struct FeatureSum {
   FeatureSum() {}
   FeatureSum(const Feature& t) {
     for (size_t i = 0; i < kFeatureSize; i++) {
-      past_[i] = AdjustedRateSum(t.past_[i]);
+      past_[i] = AdjustedRateSum(t.GetPastFeature().GetPastRate(i));
     }
     future_ = AdjustedPriceSum(t.future_);
   }
@@ -2018,7 +2641,8 @@ struct FeatureSum {
   Feature GetAverage(int count) const {
     Feature result;
     for (size_t i = 0; i < kFeatureSize; i++) {
-      result.past_[i] = past_[i].GetAverage(count);
+      *result.MutablePastFeature()->MutablePastRate(i) =
+          past_[i].GetAverage(count);
     }
     result.future_ = future_.GetAverage(count);
     result.weight_ = count;
@@ -2308,45 +2932,6 @@ class Features {
   int32_t total_weight_;
 };
 
-struct Asset {
- public:
-  Asset() : currency_(1.0),
-            foreign_currency_(0.0),
-            trade_(0.0),
-            total_fee_(0.0) {}
-
-  void Trade(Price current_price, double leverage, bool use_spread = false) {
-    double value = GetValue(current_price);
-    double last_currency = currency_;
-    foreign_currency_ = value * leverage / current_price.GetRealPrice();
-    currency_ = value - foreign_currency_ * current_price.GetRealPrice();
-    if (use_spread) {
-      double fee = fabs(last_currency - currency_) * GetParams().spread / 2;
-      currency_ -= fee;
-      total_fee_ += fee;
-    }
-    trade_ += fabs(last_currency - currency_);
-  }
-
-  double GetValue(Price current_price) const {
-    return currency_ + current_price.GetRealPrice() * foreign_currency_;
-  }
-
-  double GetTotalFee() const { return total_fee_; }
-
-  double GetTotalTrade() const { return trade_; }
-
-  double GetLeverage(Price current_price) const {
-    return 1 - currency_ / GetValue(current_price);
-  }
-
- private:
-  double currency_;
-  double foreign_currency_;
-  double trade_;
-  double total_fee_;
-};
-
 struct Leverage {
  public:
   Leverage() : minimal_leverage_(NAN), maximal_leverage_(NAN) {}
@@ -2456,6 +3041,19 @@ class Simulator {
             const AccumulatedRates* test_rates)
       : training_rates_(training_rates),
         test_rates_(test_rates) {}
+
+  void LearnQFeatures() {
+    const FeatureConfig feature_config({1, 8, 32}, 8);
+    QFeatures features;
+    features.Init(feature_config, *training_rates_, 24, 12);
+    for (double learning_rate = 1; ; learning_rate *= 0.999) {
+      for (int i = 0; i < 50; i++) {
+        // features.Replay();
+        features.Learn(learning_rate * 0.9 + 0.1);
+      }
+      features.Simulate(*test_rates_, 16);
+    }
+  }
 
   void EvaluateFeatures() {
     const FeatureConfig feature_config({1, 8, 32}, 8);
@@ -2862,6 +3460,9 @@ int main(int argc, char** argv) {
     case Params::Mode::EVALUATE: {
       simulator.EvaluateFeatures();
       break;
+    }
+    case Params::Mode::QLEARN: {
+      simulator.LearnQFeatures();
     }
   }
 

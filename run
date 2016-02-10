@@ -5,6 +5,7 @@ source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
 
 DEFINE_bool 'release' false 'Build as a release binary.'
 DEFINE_bool 'evaluate' false 'Evaluates the current model.'
+DEFINE_bool 'qlearn' false 'Learn QFeatures.'
 DEFINE_int 'num_threads' 8 'Number of threads.'
 DEFINE_enum --values='CLOSE,CROSS,LIMIT' 'future' 'LIMIT' \
     'Definition of future.'
@@ -16,10 +17,11 @@ DEFINE_bool 'future_variation' false 'Variation of future.'
 DEFINE_string 'spread' 0.000029 'Use spread.'
 
 DEFINE_list 'training' '2011' 'Years for training.'
-DEFINE_list 'test' '2012' 'Years for evaluation.'
+DEFINE_list 'evaluation' '2012' 'Years for evaluation.'
 DEFINE_bool 'dry_run' false 'Do not run the command.'
 DEFINE_string 'currency' 'USDJPY' 'Currency.'
 DEFINE_string --group='Internal' 'target' 'main' 'Target to compile.'
+DEFINE_bool 'test' false 'Testing mode.'
 
 eval "${IMOSH_INIT}"
 
@@ -43,6 +45,9 @@ export FX_NUM_THREADS="${FLAGS_num_threads}"
 if (( FLAGS_evaluate )); then
   export FX_MODE='EVALUATE'
 fi
+if (( FLAGS_qlearn )); then
+  export FX_MODE='QLEARN'
+fi
 export FX_FUTURE="${FLAGS_future}"
 export FX_FUTURE_CURVE="${FLAGS_future_curve}"
 if (( FLAGS_alsologtostderr )); then
@@ -60,17 +65,21 @@ export FX_SPREAD="${FLAGS_spread}"
 LOG INFO 'Executing...'
 commands=("./bin/${FLAGS_target}")
 
-training=()
-for year in "${FLAGS_training[@]}"; do
-  training+=("data/${FLAGS_currency}/${year}.fxbin")
-done
-commands+=("$(sub::implode ',' training)")
+if (( FLAGS_test )); then
+  commands+=('TEST')
+else
+  training=()
+  for year in "${FLAGS_training[@]}"; do
+    training+=("data/${FLAGS_currency}/${year}.fxbin")
+  done
+  commands+=("$(sub::implode ',' training)")
 
-test=()
-for year in "${FLAGS_test[@]}"; do
-  test+=("data/${FLAGS_currency}/${year}.fxbin")
-done
-commands+=("$(sub::implode ',' test)")
+  test=()
+  for year in "${FLAGS_evaluation[@]}"; do
+    test+=("data/${FLAGS_currency}/${year}.fxbin")
+  done
+  commands+=("$(sub::implode ',' test)")
+fi
 
 env | grep '^FX_' >&2
 echo "${commands[@]}" >&2
