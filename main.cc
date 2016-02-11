@@ -2350,7 +2350,7 @@ class QFeatures {
     config_ = config;
     fprintf(stderr, "Generating Q-features for %s...\n", name_.c_str());
 
-    while (features_.size() < 100) {
+    while (features_.size() < 50) {
       TimeDifference time_interval = rates.GetEndTime() - rates.GetStartTime();
       Time time = rates.GetStartTime() +
           TimeDifference::InMinute(
@@ -2364,7 +2364,8 @@ class QFeatures {
             rates.GetName().c_str(), features_.size());
 
     vector<int> ratios;
-    for (int r = ratio - ratio_range; r <= ratio + ratio_range; r += 2) {
+    for (int r = ratio - ratio_range; r <= ratio + ratio_range;
+         r += ratio_range / 4) {
       ratios.push_back(r);
     }
     TimeIterator iterator(
@@ -2459,6 +2460,7 @@ class QFeatures {
       if (!feature.Init(config_, rates, now, ratio) ||
           !volatility.IsValid() ||
           !current_price.IsValid()) {
+        leverage = 0;
         asset.Trade(last_price, 0, true);
         continue;
       }
@@ -2484,7 +2486,7 @@ class QFeatures {
             predicted_feature.MutableQFeatureScore(leverage_to)
                              ->GetScore(volatility) +
             PriceDifference::InRatio(1 - GetParams().spread) *
-            (abs(leverage_to - leverage) * abs(leverage_to) * 1.5);
+            (abs(leverage_to - leverage) * abs(leverage_to) * 2);
         if (best_score < score) {
           best_score = score;
           best_leverage = leverage_to;
@@ -2521,7 +2523,7 @@ class QFeatures {
               next_feature->MutableQFeatureScore(leverage_to)
                           ->GetScore(next_reward.GetVolatility()) +
               PriceDifference::InRatio(1 - GetParams().spread) *
-              abs(leverage_to - leverage_from) * 40 +
+              abs(leverage_to - leverage_from) * 10 +
               reward.GetReward() * leverage_to;
           if (leverage_to == -1 || best_score < score) {
             best_score = score;
@@ -3043,15 +3045,19 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void LearnQFeatures() {
+    // const FeatureConfig feature_config({1, 8, 32}, 8);
     const FeatureConfig feature_config({1, 8, 32}, 8);
+    // const FeatureConfig feature_config({1, 6, 12}, 6);
     QFeatures features;
-    features.Init(feature_config, *training_rates_, 24, 12);
+    features.Init(feature_config, *training_rates_, 12, 8);
+    // features.Init(feature_config, *training_rates_, 24, 12);
+    // features.Init(feature_config, *training_rates_, 48, 24);
     for (double learning_rate = 1; ; learning_rate *= 0.999) {
       for (int i = 0; i < 50; i++) {
         // features.Replay();
         features.Learn(learning_rate * 0.9 + 0.1);
       }
-      features.Simulate(*test_rates_, 16);
+      features.Simulate(*test_rates_, 8);
     }
   }
 
