@@ -2366,7 +2366,7 @@ class QFeatures {
     config_ = config;
     fprintf(stderr, "Generating Q-features for %s...\n", name_.c_str());
 
-    while (features_.size() < 50) {
+    while (features_.size() < 30) {
       TimeDifference time_interval = rates.GetEndTime() - rates.GetStartTime();
       Time time = rates.GetStartTime() +
           TimeDifference::InMinute(
