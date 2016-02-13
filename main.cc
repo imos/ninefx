@@ -20,7 +20,7 @@ using namespace std;
 
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
-const double kHighAndLowDistanceWeight = 1;
+const double kHighAndLowDistanceWeight = 0;
 // 予測に用いる過去の指標の割合（0.05程度が目安）
 const double kPredictRatio = 0.01;
 
@@ -721,6 +721,12 @@ struct PriceDifference {
   PriceDifference operator*(int32_t ratio) const {
     PriceDifference result;
     result.SetRawValue(GetRawValue() * ratio);
+    return result;
+  }
+
+  PriceDifference operator*(double ratio) const {
+    PriceDifference result;
+    result.SetRawValue(static_cast<int64_t>(round(GetRawValue() * ratio)));
     return result;
   }
 
@@ -2097,7 +2103,7 @@ struct PastFeature {
     return distance;
   }
 
-  string DebugString(const string& indent) const {
+  string DebugString(const string& indent = "") const {
     string result = "[\n";
     for (size_t i = 0; i < kFeatureSize; i++) {
       result += indent + "  " + past_[i].DebugString() + ",\n";
@@ -2168,8 +2174,8 @@ struct QFeatureScore {
         << DebugString();
 
     double volatility_score = covariance / variance;
-    volatility_score = min(1.0 / 5000, max(-1.0 / 5000, volatility_score));
-    volatility_score *= 0.8;
+    // volatility_score = min(1.0 / 5000, max(-1.0 / 5000, volatility_score));
+    // volatility_score *= 0.8;
     double score = y_sum_ / sum_ - x_sum_ / sum_ * volatility_score;
     CHECK(!IsNan(volatility_score) && !IsInf(volatility_score))
         << "Invalid volatility_score: " << volatility_score
@@ -2262,6 +2268,16 @@ struct QFeature {
     return &score_[index + 1];
   }
 
+  string DebugString() const {
+    string result = "{\n  \"past\": " + past_.DebugString() + ",\n  ";
+    result += "score: [\n";
+    for (int i = 0; i < 3; i++) {
+      result += "    " + score_[i].DebugString() + ",\n";
+    }
+    result += "  ]\n,}";
+    return result;
+  }
+
  private:
   PastFeature past_;
   QFeatureScore score_[3];
@@ -2298,7 +2314,7 @@ struct QFeatureReward {
     if (!next_price.IsValid()) {
       return false;
     }
-    reward_ = next_price - current_price;
+    reward_ = (next_price - current_price) * sqrt(1.0 / ratio);
 
     int min_feature_id = -1;
     double min_distance = NAN;
@@ -2321,7 +2337,7 @@ struct QFeatureReward {
   Time GetTime() const { return now_; }
   Price GetPrice() const { return price_; }
   int GetFeatureId() const { return feature_id_; }
-  PriceDifference GetReward() const { return reward_; }
+  PriceDifference GetReward(int ratio) const { return reward_ * sqrt(ratio); }
   Volatility GetVolatility() const { return volatility_; }
 
  private:
@@ -2365,20 +2381,19 @@ class QFeatures {
 
     vector<int> ratios;
     for (int r = ratio - ratio_range; r <= ratio + ratio_range;
-         r += ratio_range / 4) {
+         r += ratio_range / 2) {
       ratios.push_back(r);
     }
     TimeIterator iterator(
         rates.GetStartTime(), rates.GetEndTime(), true /* show_progress */);
-    rewards_.resize(iterator.Count() * ratios.size(), QFeatureReward());
+    rewards_.resize(ratios.size(), vector<QFeatureReward>(iterator.Count()));
     Parallel([&](int){
       Time time = iterator.GetAndIncrement();
       if (!time.IsValid()) { return false; }
       for (size_t ratio_index = 0; ratio_index < ratios.size(); ratio_index++) {
-        rewards_[
-            (time.GetMinuteIndex() - rates.GetStartTime().GetMinuteIndex()) *
-            ratios.size() + ratio_index]
-          .Init(features_, config, rates, time, ratios[ratio_index]);
+        rewards_[ratio_index][time.GetMinuteIndex() -
+                              rates.GetStartTime().GetMinuteIndex()]
+            .Init(features_, config, rates, time, ratios[ratio_index]);
       }
       return true;
     });
@@ -2393,6 +2408,7 @@ class QFeatures {
   const FeatureConfig& GetFeatureConfig() const { return config_; }
 
   void Replay() {
+    /*
     int leverage = 0;
     Asset asset;
     for (size_t reward_index = 0; reward_index + 1 < rewards_.size();
@@ -2419,7 +2435,7 @@ class QFeatures {
             feature->MutableQFeatureScore(leverage_to)
                    ->GetScore(reward.GetVolatility()) +
             PriceDifference::InRatio(1 - GetParams().spread) *
-            (abs(leverage_to - leverage));
+            (abs(leverage_to - leverage) * 2);
         if (best_score < score) {
           best_score = score;
           best_leverage = leverage_to;
@@ -2435,6 +2451,7 @@ class QFeatures {
       leverage = best_leverage;
       asset.Trade(reward.GetPrice(), best_leverage, true);
     }
+    */
   }
 
   void Simulate(const AccumulatedRates& rates,
@@ -2467,7 +2484,7 @@ class QFeatures {
       last_price = current_price;
       CHECK(current_price.IsValid()) << current_price;
 
-      PriceDifference best_score = PriceDifference::InRatio(1);
+      PriceDifference best_score = PriceDifference::InRatio(0.5);
       int best_leverage = 0;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         int min_feature_id = -1;
@@ -2486,7 +2503,7 @@ class QFeatures {
             predicted_feature.MutableQFeatureScore(leverage_to)
                              ->GetScore(volatility) +
             PriceDifference::InRatio(1 - GetParams().spread) *
-            (abs(leverage_to - leverage) * abs(leverage_to) * 2);
+            (min(1, abs(leverage_to - leverage)) * abs(leverage_to) * 2.0);
         if (best_score < score) {
           best_score = score;
           best_leverage = leverage_to;
@@ -2502,35 +2519,56 @@ class QFeatures {
       leverage = best_leverage;
       asset.Trade(current_price, best_leverage, true);
     }
+    for (const QFeature& feature : features_) {
+      LOG(INFO) << feature.DebugString();
+    }
   }
 
-  void Learn(double learning_rate) {
-    for (size_t reward_index = 0; reward_index + 1 < rewards_.size();
-         reward_index++) {
-      const QFeatureReward& reward = rewards_[reward_index];
-      const QFeatureReward& next_reward = rewards_[reward_index + 1];
-      if (!reward.IsValid() || !next_reward.IsValid()) { continue; }
-      QFeature* feature = &features_[reward.GetFeatureId()];
-      QFeature* next_feature = &features_[next_reward.GetFeatureId()];
-      for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
-        // PriceDifference best_score =
-        //     next_feature->MutableQFeatureScore(leverage_from)
-        //                 ->GetScore(next_reward.GetVolatility()) +
-        //     reward.GetReward() * leverage_from;
-        PriceDifference best_score;
-        for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
-          PriceDifference score =
-              next_feature->MutableQFeatureScore(leverage_to)
-                          ->GetScore(next_reward.GetVolatility()) +
-              PriceDifference::InRatio(1 - GetParams().spread) *
-              abs(leverage_to - leverage_from) * 10 +
-              reward.GetReward() * leverage_to;
-          if (leverage_to == -1 || best_score < score) {
-            best_score = score;
+  void Learn(double learning_rate, int ratio) {
+    for (size_t ratio_index = 0; ratio_index < rewards_.size(); ratio_index++) {
+      for (size_t reward_index = 0;
+           reward_index + 1 < rewards_[ratio_index].size(); reward_index++) {
+        const QFeatureReward& reward = rewards_[ratio_index][reward_index];
+        const QFeatureReward& next_reward =
+            rewards_[ratio_index][reward_index + 1];
+        if (!reward.IsValid() || !next_reward.IsValid()) { continue; }
+        QFeature* feature = &features_[reward.GetFeatureId()];
+        QFeature* next_feature = &features_[next_reward.GetFeatureId()];
+        for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
+          // PriceDifference best_score;
+          // for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+          //   PriceDifference score =
+          //       next_feature->MutableQFeatureScore(leverage_to)
+          //                   ->GetScore(next_reward.GetVolatility()) +
+          //       PriceDifference::InRatio(1 - GetParams().spread) *
+          //       (abs(leverage_to - leverage_from) * abs(leverage_to) * 2 +
+          //        abs(leverage_to - leverage_from) * 5) +
+          //       reward.GetReward(ratio) * leverage_to;
+          //   if (leverage_to == -1 || best_score < score) {
+          //     best_score = score;
+          //   }
+          // }
+          // feature->MutableQFeatureScore(leverage_from)
+          //        ->Record(reward.GetVolatility(), best_score);
+          PriceDifference best_score;
+          int best_leverage = 0;
+          for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+            PriceDifference score =
+                next_feature->MutableQFeatureScore(leverage_to)
+                            ->GetScore(next_reward.GetVolatility()) +
+                PriceDifference::InRatio(1 - GetParams().spread) *
+                (min(1, abs(leverage_to - leverage_from)) *
+                 abs(leverage_to) * 15 +
+                 abs(leverage_to - leverage_from) * 0) +
+                reward.GetReward(ratio) * leverage_to;
+            if (leverage_to == -1 || best_score < score) {
+              best_score = score;
+              best_leverage = leverage_to;
+            }
           }
+          feature->MutableQFeatureScore(leverage_from)
+                 ->Record(reward.GetVolatility(), best_score);
         }
-        feature->MutableQFeatureScore(leverage_from)
-               ->Record(reward.GetVolatility(), best_score);
       }
     }
     for (QFeature& feature : features_) {
@@ -2544,7 +2582,7 @@ class QFeatures {
   string name_;
   FeatureConfig config_;
   vector<QFeature> features_;
-  vector<QFeatureReward> rewards_;
+  vector<vector<QFeatureReward>> rewards_;
 };
 
 class Feature {
@@ -3049,15 +3087,17 @@ class Simulator {
     const FeatureConfig feature_config({1, 8, 32}, 8);
     // const FeatureConfig feature_config({1, 6, 12}, 6);
     QFeatures features;
-    features.Init(feature_config, *training_rates_, 12, 8);
-    // features.Init(feature_config, *training_rates_, 24, 12);
+    // features.Init(feature_config, *training_rates_, 5, 3);
+    features.Init(feature_config, *training_rates_, 10, 6);
+    // features.Init(feature_config, *training_rates_, 20, 12);
     // features.Init(feature_config, *training_rates_, 48, 24);
     for (double learning_rate = 1; ; learning_rate *= 0.999) {
       for (int i = 0; i < 50; i++) {
         // features.Replay();
-        features.Learn(learning_rate * 0.9 + 0.1);
+        features.Learn(learning_rate * 0.9 + 0.1, 8);
       }
       features.Simulate(*test_rates_, 8);
+      // features.Simulate(*test_rates_, 16);
     }
   }
 
