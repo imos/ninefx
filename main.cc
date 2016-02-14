@@ -1,5 +1,6 @@
 #include <glog/logging.h>
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdarg>
@@ -114,7 +115,10 @@ class EnumType {
     return names_[value];
   }
 
+ private:
   vector<string> names_;
+
+  DISALLOW_COPY_AND_ASSIGN(EnumType);
 };
 
 #define REGISTER_ENUM(TypeName, ...)                                           \
@@ -133,6 +137,8 @@ struct Params {
   REGISTER_ENUM(Future, CLOSE, CROSS, LIMIT);
   REGISTER_ENUM(FutureCurve, FLAT, SQRT, LINEAR, LINEAR_CUT);
 
+  Params() : initialized_(false) {}
+
   static void Init() {
     Params* params = MutableParams();
     params->num_threads = GetInteger("FX_NUM_THREADS", 32);
@@ -144,6 +150,8 @@ struct Params {
         GetInteger("FX_BASE_VOLATILITY_INTERVAL", 24 * 60);
     params->future_variation = GetBoolean("FX_FUTURE_VARIATION", false);
     params->spread = GetFloat("FX_SPREAD", 0.29 / 10000);
+
+    params->initialized_ = true;
   }
 
   static int GetInteger(const char* key, int default_value = 0) {
@@ -175,6 +183,7 @@ struct Params {
   }
 
   static const Params& GetParams() {
+    CHECK(MutableParams()->initialized_);
     return *MutableParams();
   }
 
@@ -224,11 +233,20 @@ struct Params {
     static Params params;
     return &params;
   }
+
+  bool initialized_;
+
+  DISALLOW_COPY_AND_ASSIGN(Params);
 };
 
 const Params& GetParams() { return Params::GetParams(); }
 
 void Parallel(const function<bool(int)>& f) {
+  if (GetParams().num_threads == 0) {
+    while (f(0));
+    return;
+  }
+
   vector<thread> threads;
   for (int thread_id = 0; thread_id < GetParams().num_threads; thread_id++) {
     threads.push_back(thread([&f, thread_id]{ while (f(thread_id)); }));
@@ -323,6 +341,8 @@ class SegmentTree {
   }
 
   vector<vector<T>> data_;
+
+  DISALLOW_COPY_AND_ASSIGN(SegmentTree);
 };
 
 template<class T>
@@ -706,6 +726,8 @@ class TimeIterator {
   mutex mutex_;
   Time next_time_;
   bool show_progress_;
+
+  DISALLOW_COPY_AND_ASSIGN(TimeIterator);
 };
 
 struct PriceDifference {
@@ -1261,6 +1283,8 @@ class Rates {
   }
 
   vector<Rate> rates_;
+
+  DISALLOW_COPY_AND_ASSIGN(Rates);
 };
 
 class DailyVolatility {
@@ -1377,6 +1401,8 @@ class DailyVolatility {
 
  private:
   vector<int64_t> daily_volatility_sum_;
+
+  DISALLOW_COPY_AND_ASSIGN(DailyVolatility);
 };
 
 class AccumulatedRates {
@@ -1647,6 +1673,8 @@ class AccumulatedRates {
   Time start_time_;
   Time end_time_;
   bool initialized_;
+
+  DISALLOW_COPY_AND_ASSIGN(AccumulatedRates);
 };
 
 struct AdjustedPrice {
@@ -2141,7 +2169,6 @@ struct QFeatureScore {
   }
 
   void Begin() {
-    x_.clear(); y_.clear();
     xy_sum_ = 0;
     xx_sum_ = 0;
     x_sum_ = 0;
@@ -2178,24 +2205,12 @@ struct QFeatureScore {
         << DebugString();
 
     double volatility_score = covariance / variance;
-    // volatility_score = min(1.0 / 5000, max(-1.0 / 5000, volatility_score));
-    // volatility_score *= 0.8;
     double score = y_sum_ / sum_ - x_sum_ / sum_ * volatility_score;
     CHECK(!IsNan(volatility_score) && !IsInf(volatility_score))
         << "Invalid volatility_score: " << volatility_score
         << ", " << DebugString();
     CHECK(!IsNan(score) && !IsInf(score))
         << "Invalid score: " << score << ", " << DebugString();
-    if (numeric_limits<int32_t>::max() <
-        score * PriceDifference::kLogPriceRatio) {
-      LOG(INFO) << "covariance=" << covariance;
-      LOG(INFO) << "variance=" << variance;
-      LOG(INFO) << "volatility_score=" << volatility_score;
-      LOG(INFO) << "score=" << score;
-      for (size_t i = 0; i < x_.size(); i++) {
-        LOG(INFO) << "x=" << x_[i] << ", " << y_[i];
-      }
-    }
     CHECK_LE(score * PriceDifference::kLogPriceRatio,
              numeric_limits<int32_t>::max())
         << "Invalid score: " << score << ", " << DebugString();
@@ -2213,13 +2228,10 @@ struct QFeatureScore {
   void Record(Volatility volatility, PriceDifference reward) {
     CHECK(volatility.IsValid())
         << "Invalid volatility: " << volatility.DebugString();
-    // CHECK(reward.IsValid()) << "Invalid reward: " << reward.DebugString();
 
     const double kDiscountFactor = 0.99;
     double x = sqrt(volatility.GetValue());
     double y = reward.GetLogValue() * kDiscountFactor;
-    // x_.push_back(x);
-    // y_.push_back(y);
     xy_sum_ += x * y;
     xx_sum_ += x * x;
     x_sum_ += x;
@@ -2242,7 +2254,6 @@ struct QFeatureScore {
   double score_;
   double volatility_score_;
 
-  vector<double> x_, y_;
   double xy_sum_;
   double xx_sum_;
   double x_sum_;
@@ -2289,7 +2300,11 @@ struct QFeature {
 
 struct QFeatureReward {
  public:
-  QFeatureReward() : feature_id_(-1), next_reward_(nullptr) {}
+  QFeatureReward() : next_reward_(nullptr) {
+    for (auto& feature_id : feature_ids_) {
+      feature_id = -1;
+    }
+  }
 
   bool Init(const vector<QFeature>& features,
             const FeatureConfig& config,
@@ -2320,27 +2335,36 @@ struct QFeatureReward {
     }
     reward_ = (next_price - current_price) * sqrt(1.0 / ratio);
 
-    int min_feature_id = -1;
-    double min_distance = NAN;
+    vector<pair<double, int>> distance_and_feature_ids;
     for (int feature_id = 0; feature_id < (int)features.size(); feature_id++) {
-      double distance =
-          features[feature_id].MeasureDistance(config, feature);
-      if (IsNan(min_distance) || distance < min_distance) {
-        min_distance = distance;
-        min_feature_id = feature_id;
-      }
+      distance_and_feature_ids.emplace_back(
+          features[feature_id].MeasureDistance(config, feature),
+          feature_id);
     }
-    feature_id_ = min_feature_id;
+    sort(distance_and_feature_ids.begin(), distance_and_feature_ids.end());
+    CHECK_LE(feature_ids_.size(), distance_and_feature_ids.size());
+    for (size_t feature_id_index = 0;
+         feature_id_index < feature_ids_.size(); feature_id_index++) {
+      feature_ids_[feature_id_index] =
+          distance_and_feature_ids[feature_id_index].second;
+    }
+
     return true;
   }
 
   bool IsValid() const {
-    return feature_id_ >= 0;
+    return feature_ids_[0] >= 0;
   }
 
   Time GetTime() const { return now_; }
   Price GetPrice() const { return price_; }
-  int GetFeatureId() const { return feature_id_; }
+
+  // TODO(imos): Deprecate this.  Use GetFeatureIds instead.
+  // int GetFeatureId() const {
+  //   return feature_ids_[0];
+  // }
+  const array<int, 10>& GetFeatureIds() const { return feature_ids_; }
+
   PriceDifference GetReward(int ratio) const { return reward_ * sqrt(ratio); }
   Volatility GetVolatility() const { return volatility_; }
 
@@ -2353,7 +2377,7 @@ struct QFeatureReward {
  private:
   Time now_;
   Price price_;
-  int feature_id_;
+  array<int, 10> feature_ids_;
   PriceDifference reward_;
   Volatility volatility_;
   const QFeatureReward* next_reward_;
@@ -2377,7 +2401,7 @@ class QFeatures {
     config_ = config;
     fprintf(stderr, "Generating Q-features for %s...\n", name_.c_str());
 
-    while (features_.size() < 30) {
+    while (features_.size() < 300) {
       TimeDifference time_interval = rates.GetEndTime() - rates.GetStartTime();
       Time time = rates.GetStartTime() +
           TimeDifference::InMinute(
@@ -2404,17 +2428,30 @@ class QFeatures {
       for (size_t ratio_index = 0; ratio_index < ratios.size(); ratio_index++) {
         int reward_index =
             time.GetMinuteIndex() - rates.GetStartTime().GetMinuteIndex();
+        CHECK_LE(0, reward_index);
+        CHECK_LT(reward_index, rewards_[ratio_index].size());
         rewards_[ratio_index][reward_index]
             .Init(features_, config, rates, time, ratios[ratio_index]);
-        if (reward_index + 1 < iterator.Count()) {
-          rewards_[ratio_index][reward_index].SetNextReward(
-              &rewards_[ratio_index][reward_index + 1]);
-        }
       }
       return true;
     });
 
-    LOG(INFO) << "Q-features for " << name_ << " is initialized.";
+    // 転置インデックス (feature_rewards_) の生成
+    feature_rewards_ = vector<vector<QFeatureReward*>>(features_.size());
+    for (vector<QFeatureReward>& ratio_rewards : rewards_) {
+      for (size_t reward_index = 0; reward_index + 1 < ratio_rewards.size();
+           reward_index++) {
+        ratio_rewards[reward_index].SetNextReward(
+            &ratio_rewards[reward_index + 1]);
+        for (int feature_index : ratio_rewards[reward_index].GetFeatureIds()) {
+          if (feature_index < 0) { continue; }
+          feature_rewards_[feature_index].push_back(
+              &ratio_rewards[reward_index]);
+        }
+      }
+    }
+
+    LOG(INFO) << "Q-features for " << name_ << " are initialized.";
   }
 
   size_t size() const { return features_.size(); }
@@ -2540,12 +2577,13 @@ class QFeatures {
     }
   }
 
-  void LearnReward(const QFeatureReward& reward,
-                   const QFeatureReward& next_reward,
-                   int ratio) {
-    if (!reward.IsValid() || !next_reward.IsValid()) { return; }
-    QFeature* feature = &features_[reward.GetFeatureId()];
-    QFeature* next_feature = &features_[next_reward.GetFeatureId()];
+  void LearnReward(const QFeatureReward& reward, int feature_id, int ratio) {
+    if (!reward.IsValid() || !reward.HasNextReward()) { return; }
+    const QFeatureReward& next_reward = reward.GetNextReward();
+    if (!next_reward.IsValid()) { return; }
+
+    QFeature* feature = &features_[feature_id];
+    QFeature* next_feature = &features_[next_reward.GetFeatureIds()[0]];
     for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
       PriceDifference best_score;
       int best_leverage = 0;
@@ -2569,21 +2607,40 @@ class QFeatures {
   }
 
   void Learn(double learning_rate, int ratio) {
-    for (size_t reward_index = 0;
-         reward_index < rewards_[0].size(); reward_index++) {
-      for (size_t ratio_index = 0; ratio_index < rewards_.size();
-           ratio_index++) {
-        CHECK_LT(reward_index, rewards_[ratio_index].size());
-        LearnReward(rewards_[ratio_index][reward_index],
-                    rewards_[ratio_index][reward_index + 1],
-                    ratio);
+    // for (size_t reward_index = 0;
+    //      reward_index < rewards_[0].size(); reward_index++) {
+    //   for (size_t ratio_index = 0; ratio_index < rewards_.size();
+    //        ratio_index++) {
+    //     CHECK_LT(reward_index, rewards_[ratio_index].size());
+    //     LearnReward(rewards_[ratio_index][reward_index],
+    //                 rewards_[ratio_index][reward_index + 1],
+    //                 ratio);
+    //   }
+    // }
+    size_t next_feature_id = 0;
+    mutex feature_id_mutex;
+    Parallel([&](int) {
+      size_t feature_id;
+      {
+        lock_guard<mutex> feature_id_mutex_guard(feature_id_mutex);
+        feature_id = next_feature_id;
+        if (feature_id >= feature_rewards_.size()) {
+          return false;
+        }
+        next_feature_id++;
       }
-    }
-    for (QFeature& feature : features_) {
+
+      for (const QFeatureReward* reward : feature_rewards_[feature_id]) {
+        LearnReward(*reward, feature_id, ratio);
+      }
+
       for (int leverage = -1; leverage <= 1; leverage++) {
-        feature.MutableQFeatureScore(leverage)->Commit(learning_rate);
+        features_[feature_id].MutableQFeatureScore(leverage)
+            ->Commit(learning_rate);
       }
-    }
+
+      return true;
+    });
   }
 
  private:
@@ -2601,7 +2658,7 @@ class QFeatures {
   DISALLOW_COPY_AND_ASSIGN(QFeatures);
 };
 
-class Feature {
+struct Feature {
  public:
   static constexpr size_t kFeatureSize = FeatureConfig::kFeatureSize;
 
@@ -2765,6 +2822,17 @@ class Features {
     InitFuturePrice();
   }
 
+  void Init(const vector<Feature> features,
+            const FeatureConfig& config,
+            const string& name) {
+    name_ = name;
+    config_ = config;
+    features_ = features;
+    fprintf(stderr, "Features for %s\n", name_.c_str());
+    InitTotalWeight();
+    InitFuturePrice();
+  }
+
   void Init(const FeatureConfig& config,
             const AccumulatedRates& rates,
             int ratio_from,
@@ -2858,7 +2926,7 @@ class Features {
   const FeatureConfig& GetFeatureConfig() const { return config_; }
   const AdjustedPriceStat& GetFutureStat() const { return future_stat_; }
 
-  Features Cluster(int size) const {
+  void Cluster(int size, Features* output) const {
     fprintf(stderr, "Clustering features for %s...\n", name_.c_str());
 
     if ((int)features_.size() / 2 < size) {
@@ -2941,7 +3009,7 @@ class Features {
     fprintf(stderr, "Average future price: %.6f\n",
             future_price.GetAverage().GetRegularizedPrice().GetRealPrice());
 
-    return Features(average_features, config_, "clustered " + name_);
+    output->Init(average_features, config_, "clustered " + name_);
   }
 
   AdjustedPrice Predict(const Feature& target) const {
@@ -2986,6 +3054,8 @@ class Features {
   vector<Feature> features_;
   AdjustedPriceStat future_stat_;
   int32_t total_weight_;
+
+  DISALLOW_COPY_AND_ASSIGN(Features);
 };
 
 struct Leverage {
@@ -3011,7 +3081,7 @@ struct Leverage {
   double maximal_leverage_;
 };
 
-class Correlation {
+struct Correlation {
  public:
   Correlation()
       : sum_(0), x_sum_(0), xx_sum_(0), y_sum_(0), yy_sum_(0), xy_sum_(0) {}
@@ -3053,7 +3123,7 @@ class Correlation {
   double xy_sum_;
 };
 
-class Correlations {
+struct Correlations {
  public:
   Correlations() : sum_(0), x_sum_(0), xx_sum_(0) {}
 
@@ -3130,7 +3200,7 @@ class Simulator {
       // training_features.Init(feature_config, *training_rates_, 32, 256);
       training_features.Init(feature_config, *training_rates_, 4, 64);
       // training_features.Init(feature_config, *training_rates_, 16, 64);
-      clustered_features = training_features.Cluster(1000);
+      training_features.Cluster(1000, &clustered_features);
     }
 
     const int kRatioSize = 7;
@@ -3205,11 +3275,14 @@ class Simulator {
     return predicted_price;
   }
 
-  Features GenerateModel(
-      const FeatureConfig& config, int ratio_from, int ratio_to) {
+  void GenerateModel(
+      const FeatureConfig& config,
+      int ratio_from,
+      int ratio_to,
+      Features* output) {
     Features training_features;
     training_features.Init(config, *training_rates_, ratio_from, ratio_to);
-    return training_features.Cluster(1000);
+    training_features.Cluster(1000, output);
   }
 
   bool ShouldExitPosition(const Features& model,
@@ -3265,7 +3338,8 @@ class Simulator {
   void SimulateDiscrete() {
 //    FeatureConfig feature_config({1, 8, 64}, 8);
     FeatureConfig feature_config({1, 8, 64}, 8);
-    Features model = GenerateModel(feature_config, 4, 32);
+    Features model;
+    GenerateModel(feature_config, 4, 32, &model);
 
     Asset base_asset;
     Asset asset;
@@ -3411,7 +3485,8 @@ class Simulator {
 
   void Simulate() {
     FeatureConfig feature_config({1, 8, 32}, 8);
-    Features model = GenerateModel(feature_config, 4, 64);
+    Features model;
+    GenerateModel(feature_config, 4, 64, &model);
 
     Time next_now = test_rates_->GetStartTime();
     promise<TradeState> initial_state;
@@ -3456,6 +3531,8 @@ class Simulator {
  private:
   const AccumulatedRates* training_rates_;
   const AccumulatedRates* test_rates_;
+
+  DISALLOW_COPY_AND_ASSIGN(Simulator);
 };
 
 void Test() {
