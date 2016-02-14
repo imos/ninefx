@@ -18,6 +18,10 @@
 #include <vector>
 using namespace std;
 
+#define DISALLOW_COPY_AND_ASSIGN(TypeName) \
+    TypeName(const TypeName&); \
+    void operator=(const TypeName&)
+
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
 const double kHighAndLowDistanceWeight = 0;
@@ -2285,7 +2289,7 @@ struct QFeature {
 
 struct QFeatureReward {
  public:
-  QFeatureReward() : feature_id_(-1) {}
+  QFeatureReward() : feature_id_(-1), next_reward_(nullptr) {}
 
   bool Init(const vector<QFeature>& features,
             const FeatureConfig& config,
@@ -2340,12 +2344,19 @@ struct QFeatureReward {
   PriceDifference GetReward(int ratio) const { return reward_ * sqrt(ratio); }
   Volatility GetVolatility() const { return volatility_; }
 
+  void SetNextReward(const QFeatureReward* next_reward)
+      { next_reward_ = next_reward; }
+  bool HasNextReward() const { return next_reward_ != nullptr; }
+  const QFeatureReward& GetNextReward() const
+      { return *CHECK_NOTNULL(next_reward_); }
+
  private:
   Time now_;
   Price price_;
   int feature_id_;
   PriceDifference reward_;
   Volatility volatility_;
+  const QFeatureReward* next_reward_;
 };
 
 class QFeatures {
@@ -2391,9 +2402,14 @@ class QFeatures {
       Time time = iterator.GetAndIncrement();
       if (!time.IsValid()) { return false; }
       for (size_t ratio_index = 0; ratio_index < ratios.size(); ratio_index++) {
-        rewards_[ratio_index][time.GetMinuteIndex() -
-                              rates.GetStartTime().GetMinuteIndex()]
+        int reward_index =
+            time.GetMinuteIndex() - rates.GetStartTime().GetMinuteIndex();
+        rewards_[ratio_index][reward_index]
             .Init(features_, config, rates, time, ratios[ratio_index]);
+        if (reward_index + 1 < iterator.Count()) {
+          rewards_[ratio_index][reward_index].SetNextReward(
+              &rewards_[ratio_index][reward_index + 1]);
+        }
       }
       return true;
     });
@@ -2524,51 +2540,43 @@ class QFeatures {
     }
   }
 
-  void Learn(double learning_rate, int ratio) {
-    for (size_t ratio_index = 0; ratio_index < rewards_.size(); ratio_index++) {
-      for (size_t reward_index = 0;
-           reward_index + 1 < rewards_[ratio_index].size(); reward_index++) {
-        const QFeatureReward& reward = rewards_[ratio_index][reward_index];
-        const QFeatureReward& next_reward =
-            rewards_[ratio_index][reward_index + 1];
-        if (!reward.IsValid() || !next_reward.IsValid()) { continue; }
-        QFeature* feature = &features_[reward.GetFeatureId()];
-        QFeature* next_feature = &features_[next_reward.GetFeatureId()];
-        for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
-          // PriceDifference best_score;
-          // for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
-          //   PriceDifference score =
-          //       next_feature->MutableQFeatureScore(leverage_to)
-          //                   ->GetScore(next_reward.GetVolatility()) +
-          //       PriceDifference::InRatio(1 - GetParams().spread) *
-          //       (abs(leverage_to - leverage_from) * abs(leverage_to) * 2 +
-          //        abs(leverage_to - leverage_from) * 5) +
-          //       reward.GetReward(ratio) * leverage_to;
-          //   if (leverage_to == -1 || best_score < score) {
-          //     best_score = score;
-          //   }
-          // }
-          // feature->MutableQFeatureScore(leverage_from)
-          //        ->Record(reward.GetVolatility(), best_score);
-          PriceDifference best_score;
-          int best_leverage = 0;
-          for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
-            PriceDifference score =
-                next_feature->MutableQFeatureScore(leverage_to)
-                            ->GetScore(next_reward.GetVolatility()) +
-                PriceDifference::InRatio(1 - GetParams().spread) *
-                (min(1, abs(leverage_to - leverage_from)) *
-                 abs(leverage_to) * 15 +
-                 abs(leverage_to - leverage_from) * 0) +
-                reward.GetReward(ratio) * leverage_to;
-            if (leverage_to == -1 || best_score < score) {
-              best_score = score;
-              best_leverage = leverage_to;
-            }
-          }
-          feature->MutableQFeatureScore(leverage_from)
-                 ->Record(reward.GetVolatility(), best_score);
+  void LearnReward(const QFeatureReward& reward,
+                   const QFeatureReward& next_reward,
+                   int ratio) {
+    if (!reward.IsValid() || !next_reward.IsValid()) { return; }
+    QFeature* feature = &features_[reward.GetFeatureId()];
+    QFeature* next_feature = &features_[next_reward.GetFeatureId()];
+    for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
+      PriceDifference best_score;
+      int best_leverage = 0;
+      for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+        PriceDifference score =
+            next_feature->MutableQFeatureScore(leverage_to)
+                        ->GetScore(next_reward.GetVolatility()) +
+            PriceDifference::InRatio(1 - GetParams().spread) *
+            (min(1, abs(leverage_to - leverage_from)) *
+             abs(leverage_to) * 15 +
+             abs(leverage_to - leverage_from) * 0) +
+            reward.GetReward(ratio) * leverage_to;
+        if (leverage_to == -1 || best_score < score) {
+          best_score = score;
+          best_leverage = leverage_to;
         }
+      }
+      feature->MutableQFeatureScore(leverage_from)
+             ->Record(reward.GetVolatility(), best_score);
+    }
+  }
+
+  void Learn(double learning_rate, int ratio) {
+    for (size_t reward_index = 0;
+         reward_index < rewards_[0].size(); reward_index++) {
+      for (size_t ratio_index = 0; ratio_index < rewards_.size();
+           ratio_index++) {
+        CHECK_LT(reward_index, rewards_[ratio_index].size());
+        LearnReward(rewards_[ratio_index][reward_index],
+                    rewards_[ratio_index][reward_index + 1],
+                    ratio);
       }
     }
     for (QFeature& feature : features_) {
@@ -2583,6 +2591,14 @@ class QFeatures {
   FeatureConfig config_;
   vector<QFeature> features_;
   vector<vector<QFeatureReward>> rewards_;
+
+  // features_ のインデックスから rewards_ の中へのポインター．
+  // NOTE: 並列化のため更新対象となる QFeature でインデックスされた QFeatureReward の
+  // ポインター群を保存している．
+  vector<vector<QFeatureReward*>> feature_rewards_;
+
+  // NOTE: feature_rewards_ がポインターを持つためコピーを禁止している
+  DISALLOW_COPY_AND_ASSIGN(QFeatures);
 };
 
 class Feature {
