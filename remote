@@ -1,9 +1,33 @@
 #!/bin/bash
 
 source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
+IMOSH_PREDICATE=1 eval "${IMOSH_INIT}"
 
-rsync -az --delete -e "ssh -i ${HOME}/.ssh/ec2-tokyo.pem" ./ "ec2-user@${REMOTE_HOST}":~/ninefx
+sync() {
+  rsync -az --delete -e "ssh -i ${HOME}/.ssh/ec2-tokyo.pem" \
+      ./ "ec2-user@${REMOTE_HOST}":~/ninefx
+}
 
-commands=(./run "$@")
-func::array_map commands INPLACE func::escapeshellarg
-ssh -i "${HOME}/.ssh/ec2-tokyo.pem" "ec2-user@${REMOTE_HOST}" -- "cd ninefx; ${commands[*]}"
+remote_run() {
+  ssh -t -i "${HOME}/.ssh/ec2-tokyo.pem" "ec2-user@${REMOTE_HOST}" -- "$@"
+}
+
+run() {
+  sync
+  shift
+  commands=(./run "$@")
+  func::array_map commands INPLACE func::escapeshellarg
+  LOG INFO "Running... ${commands[*]}"
+  remote_run "cd ninefx; ${commands[*]}"
+}
+
+install() {
+  sync
+  remote_run "cd ninefx; ./install"
+}
+
+case "$1" in
+  'run') run "$@";;
+  'install') install;;
+  *) LOG FATAL "Unknown command: $1";;
+esac

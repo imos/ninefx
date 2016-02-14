@@ -762,6 +762,11 @@ struct PriceDifference {
     return result;
   }
 
+  const PriceDifference& operator+=(PriceDifference value) {
+    *this = *this + value;
+    return *this;
+  }
+
   bool operator<(PriceDifference value) const {
     return log_price_ < value.log_price_;
   }
@@ -2401,7 +2406,7 @@ class QFeatures {
     config_ = config;
     fprintf(stderr, "Generating Q-features for %s...\n", name_.c_str());
 
-    while (features_.size() < 300) {
+    while (features_.size() < 500) {
       TimeDifference time_interval = rates.GetEndTime() - rates.GetStartTime();
       Time time = rates.GetStartTime() +
           TimeDifference::InMinute(
@@ -2537,44 +2542,73 @@ class QFeatures {
       last_price = current_price;
       CHECK(current_price.IsValid()) << current_price;
 
+      vector<pair<double, int>> distance_and_feature_ids;
+      for (int feature_id = 0; feature_id < (int)features_.size();
+           feature_id++) {
+        distance_and_feature_ids.emplace_back(
+            features_[feature_id].MeasureDistance(config_, feature),
+            feature_id);
+      }
+      sort(distance_and_feature_ids.begin(), distance_and_feature_ids.end());
+
       PriceDifference best_score = PriceDifference::InRatio(0.5);
       int best_leverage = 0;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
-        int min_feature_id = -1;
-        double min_distance = NAN;
-        for (int feature_id = 0; feature_id < (int)features_.size();
-             feature_id++) {
-          double distance =
-              features_[feature_id].MeasureDistance(config_, feature);
-          if (IsNan(min_distance) || distance < min_distance) {
-            min_distance = distance;
-            min_feature_id = feature_id;
-          }
-        }
-        QFeature& predicted_feature = features_[min_feature_id];
         PriceDifference score =
-            predicted_feature.MutableQFeatureScore(leverage_to)
-                             ->GetScore(volatility) +
             PriceDifference::InRatio(1 - GetParams().spread) *
-            (min(1, abs(leverage_to - leverage)) * abs(leverage_to) * 2.0);
+            (min(1, abs(leverage_to - leverage)) * abs(leverage_to) * 10.0);
+        for (int i = 0; i < 10; i++) {
+          QFeature& predicted_feature =
+              features_[distance_and_feature_ids[i].second];
+          score += predicted_feature.MutableQFeatureScore(leverage_to)
+                                    ->GetScore(volatility);
+        }
         if (best_score < score) {
           best_score = score;
           best_leverage = leverage_to;
         }
       }
-      if (leverage != best_leverage) {
+
+      /*
+      int leverage_sum = 0;
+      int count = 0;
+      for (const pair<double, int>& distance_and_feature_id :
+           distance_and_feature_ids) {
+        int feature_id = distance_and_feature_id.second;
+        PriceDifference best_score = PriceDifference::InRatio(0.5);
+        int best_leverage = 0;
+        for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
+          QFeature& predicted_feature = features_[feature_id];
+          PriceDifference score =
+              predicted_feature.MutableQFeatureScore(leverage_to)
+                               ->GetScore(volatility) +
+              PriceDifference::InRatio(1 - GetParams().spread) *
+              (min(1, abs(leverage_to - leverage)) * abs(leverage_to) * 3.0);
+          if (best_score < score) {
+            best_score = score;
+            best_leverage = leverage_to;
+          }
+        }
+        leverage_sum += best_leverage;
+        if (++count >= 3) { break; }
+        // if (abs(leverage_sum) >= 3) { break; }
+      }
+      */
+
+      int next_leverage = best_leverage;
+
+      if (leverage != next_leverage) {
         LOG(INFO) << now.DebugString() << ": "
                   << current_price.DebugString() << ": "
                   << StringPrintf("%.6f", asset.GetValue(current_price))
-                  << StringPrintf(": %+d => %+d", leverage, best_leverage)
-                  << StringPrintf(": %+.6f", best_score.GetLogValue());
+                  << StringPrintf(": %+d => %+d", leverage, next_leverage);
       }
-      leverage = best_leverage;
-      asset.Trade(current_price, best_leverage, true);
+      leverage = next_leverage;
+      asset.Trade(current_price, next_leverage, true);
     }
-    for (const QFeature& feature : features_) {
-      LOG(INFO) << feature.DebugString();
-    }
+    // for (const QFeature& feature : features_) {
+    //   LOG(INFO) << feature.DebugString();
+    // }
   }
 
   void LearnReward(const QFeatureReward& reward, int feature_id, int ratio) {
@@ -2586,19 +2620,17 @@ class QFeatures {
     QFeature* next_feature = &features_[next_reward.GetFeatureIds()[0]];
     for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
       PriceDifference best_score;
-      int best_leverage = 0;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         PriceDifference score =
             next_feature->MutableQFeatureScore(leverage_to)
                         ->GetScore(next_reward.GetVolatility()) +
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage_from)) *
-             abs(leverage_to) * 15 +
+             abs(leverage_to) * 20 +
              abs(leverage_to - leverage_from) * 0) +
             reward.GetReward(ratio) * leverage_to;
         if (leverage_to == -1 || best_score < score) {
           best_score = score;
-          best_leverage = leverage_to;
         }
       }
       feature->MutableQFeatureScore(leverage_from)
