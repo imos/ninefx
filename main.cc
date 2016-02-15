@@ -29,13 +29,8 @@ const double kHighAndLowDistanceWeight = 0;
 // 予測に用いる過去の指標の割合（0.05程度が目安）
 const double kPredictRatio = 0.01;
 
-// 周期が2^64のXorshift乱数生成関数
-uint32_t Rand() {
-  static uint64_t x =
-      88172645463325252ULL ^ static_cast<uint64_t>(time(nullptr));
-  x = x ^ (x << 13); x = x ^ (x >> 7);
-  return static_cast<uint32_t>(x = x ^ (x << 17));
-}
+constexpr int kQFeatureSize = 1000;
+constexpr int kQRedundancy = 50;
 
 template<typename T>
 int Sign(T x) {
@@ -241,6 +236,15 @@ struct Params {
 
 const Params& GetParams() { return Params::GetParams(); }
 
+// 周期が2^64のXorshift乱数生成関数
+uint32_t Rand() {
+  static uint64_t x =
+      88172645463325252ULL ^ static_cast<uint64_t>(
+          Params::GetInteger("FX_RANDOM_SEED", time(nullptr)));
+  x = x ^ (x << 13); x = x ^ (x >> 7);
+  return static_cast<uint32_t>(x = x ^ (x << 17));
+}
+
 void Parallel(const function<bool(int)>& f) {
   if (GetParams().num_threads == 0) {
     while (f(0));
@@ -254,6 +258,32 @@ void Parallel(const function<bool(int)>& f) {
   for (thread& t : threads) {
     t.join();
   }
+}
+
+template<class T, class S = T>
+void ParallelFor(
+    T begin, T end, S step, S chunk_step, const function<void(T)>& f) {
+  vector<thread> threads;
+  T next = begin;
+  mutex t_mutex;
+  Parallel([&](int) {
+    T base;
+    {
+      lock_guard<mutex> t_mutex_guard(t_mutex);
+      base = next;
+      if (!(base < end)) {
+        return false;
+      }
+      next += chunk_step;
+    }
+
+    for (T current = base; current < end && current < base + chunk_step;
+         current += step) {
+      f(current);
+    }
+
+    return true;
+  });
 }
 
 #define CLEAR_LINE "\033[1A\033[2K"
@@ -754,6 +784,10 @@ struct PriceDifference {
     PriceDifference result;
     result.SetRawValue(static_cast<int64_t>(round(GetRawValue() * ratio)));
     return result;
+  }
+
+  PriceDifference operator/(double ratio) const {
+    return *this * (1 / ratio);
   }
 
   PriceDifference operator+(PriceDifference value) const {
@@ -2150,14 +2184,14 @@ struct PastFeature {
   }
 
   const AdjustedRate& GetPastRate(int index) const {
-    CHECK_GE(0, index);
-    CHECK_GT(index, kFeatureSize);
+    CHECK_LE(0, index);
+    CHECK_LT(index, kFeatureSize);
     return past_[index];
   }
 
   AdjustedRate* MutablePastRate(int index) {
-    CHECK_GE(0, index);
-    CHECK_GT(index, kFeatureSize);
+    CHECK_LE(0, index);
+    CHECK_LT(index, kFeatureSize);
     return &past_[index];
   }
 
@@ -2197,8 +2231,8 @@ struct QFeatureScore {
   }
 
   void Commit(double learning_rate = 0.1) {
-    if (sum_ < 2.001) {
-      LOG(ERROR) << "Bad commit.";
+    if (sum_ < 10) {
+      LOG(ERROR) << "Bad commit: " << sum_;
       Begin();
       return;
     }
@@ -2233,6 +2267,8 @@ struct QFeatureScore {
   void Record(Volatility volatility, PriceDifference reward) {
     CHECK(volatility.IsValid())
         << "Invalid volatility: " << volatility.DebugString();
+    CHECK_LT(PriceDifference::InRatio(0.66), reward);
+    CHECK_LT(reward, PriceDifference::InRatio(1.5));
 
     const double kDiscountFactor = 0.99;
     double x = sqrt(volatility.GetValue());
@@ -2243,6 +2279,8 @@ struct QFeatureScore {
     y_sum_ += y;
     sum_ += 1;
   }
+
+  int GetWeight() const { return round(sum_); }
 
   string DebugString() const {
     return "{\"score\": " + StringPrintf("%g", score_) + ", " +
@@ -2309,6 +2347,9 @@ struct QFeatureReward {
     for (auto& feature_id : feature_ids_) {
       feature_id = -1;
     }
+    for (auto& score : scores_) {
+      score = PriceDifference::InRatio(1);
+    }
   }
 
   bool Init(const vector<QFeature>& features,
@@ -2368,23 +2409,35 @@ struct QFeatureReward {
   // int GetFeatureId() const {
   //   return feature_ids_[0];
   // }
-  const array<int, 10>& GetFeatureIds() const { return feature_ids_; }
+  const array<int, kQRedundancy>& GetFeatureIds() const { return feature_ids_; }
 
   PriceDifference GetReward(int ratio) const { return reward_ * sqrt(ratio); }
   Volatility GetVolatility() const { return volatility_; }
 
   void SetNextReward(const QFeatureReward* next_reward)
-      { next_reward_ = next_reward; }
+      { next_reward_ = CHECK_NOTNULL(next_reward); }
   bool HasNextReward() const { return next_reward_ != nullptr; }
   const QFeatureReward& GetNextReward() const
       { return *CHECK_NOTNULL(next_reward_); }
 
+  PriceDifference GetScore(int leverage) const {
+    CHECK_LE(-1, leverage);
+    CHECK_LE(leverage, 1);
+    return scores_[leverage + 1];
+  }
+  void SetScore(int leverage, PriceDifference score) {
+    CHECK_LE(-1, leverage);
+    CHECK_LE(leverage, 1);
+    scores_[leverage + 1] = score;
+  }
+
  private:
   Time now_;
   Price price_;
-  array<int, 10> feature_ids_;
+  array<int, kQRedundancy> feature_ids_;
   PriceDifference reward_;
   Volatility volatility_;
+  array<PriceDifference, 3> scores_;
   const QFeatureReward* next_reward_;
 };
 
@@ -2406,11 +2459,17 @@ class QFeatures {
     config_ = config;
     fprintf(stderr, "Generating Q-features for %s...\n", name_.c_str());
 
-    while (features_.size() < 500) {
-      TimeDifference time_interval = rates.GetEndTime() - rates.GetStartTime();
+    set<Time> times;
+    while (features_.size() < kQFeatureSize) {
+      int interval = rates.GetEndTime().GetMinuteIndex() -
+                     rates.GetStartTime().GetMinuteIndex();
       Time time = rates.GetStartTime() +
           TimeDifference::InMinute(
-              static_cast<int32_t>(Rand() % (time_interval.GetSecond() / 60)));
+              static_cast<int32_t>(Rand() % interval));
+      if (times.count(time) > 0) {
+        continue;
+      }
+      times.insert(time);
       QFeature feature;
       if (feature.Init(config, rates, time, ratio)) {
         features_.push_back(feature);
@@ -2465,53 +2524,6 @@ class QFeatures {
 
   const FeatureConfig& GetFeatureConfig() const { return config_; }
 
-  void Replay() {
-    /*
-    int leverage = 0;
-    Asset asset;
-    for (size_t reward_index = 0; reward_index + 1 < rewards_.size();
-         reward_index++) {
-      const QFeatureReward& reward = rewards_[reward_index];
-      const QFeatureReward& next_reward = rewards_[reward_index + 1];
-      if (!reward.IsValid()) {
-        continue;
-      }
-      if (!next_reward.IsValid()) {
-        LOG(INFO) << reward.GetTime().DebugString() << ": "
-                  << reward.GetPrice().DebugString() << ": "
-                  << StringPrintf("%.6f", asset.GetValue(reward.GetPrice()))
-                  << ": settlement.";
-        leverage = 0;
-        asset.Trade(reward.GetPrice(), 0, true);
-        continue;
-      }
-      QFeature* feature = &features_[reward.GetFeatureId()];
-      PriceDifference best_score = PriceDifference::InRatio(1);
-      int best_leverage = 0;
-      for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
-        PriceDifference score =
-            feature->MutableQFeatureScore(leverage_to)
-                   ->GetScore(reward.GetVolatility()) +
-            PriceDifference::InRatio(1 - GetParams().spread) *
-            (abs(leverage_to - leverage) * 2);
-        if (best_score < score) {
-          best_score = score;
-          best_leverage = leverage_to;
-        }
-      }
-      if (leverage != best_leverage) {
-        LOG(INFO) << reward.GetTime().DebugString() << ": "
-                  << reward.GetPrice().DebugString() << ": "
-                  << StringPrintf("%.6f", asset.GetValue(reward.GetPrice()))
-                  << StringPrintf(": %+d => %+d", leverage, best_leverage)
-                  << StringPrintf(": %+.6f", best_score.GetLogValue());
-      }
-      leverage = best_leverage;
-      asset.Trade(reward.GetPrice(), best_leverage, true);
-    }
-    */
-  }
-
   void Simulate(const AccumulatedRates& rates,
                 int ratio) {
     int leverage = 0;
@@ -2543,8 +2555,7 @@ class QFeatures {
       CHECK(current_price.IsValid()) << current_price;
 
       vector<pair<double, int>> distance_and_feature_ids;
-      for (int feature_id = 0; feature_id < (int)features_.size();
-           feature_id++) {
+      for (size_t feature_id = 0; feature_id < features_.size(); feature_id++) {
         distance_and_feature_ids.emplace_back(
             features_[feature_id].MeasureDistance(config_, feature),
             feature_id);
@@ -2556,8 +2567,9 @@ class QFeatures {
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         PriceDifference score =
             PriceDifference::InRatio(1 - GetParams().spread) *
-            (min(1, abs(leverage_to - leverage)) * abs(leverage_to) * 10.0);
-        for (int i = 0; i < 10; i++) {
+            (min(1, abs(leverage_to - leverage)) *
+             abs(leverage_to) * kQRedundancy * 1.5);
+        for (int i = 0; i < kQRedundancy; i++) {
           QFeature& predicted_feature =
               features_[distance_and_feature_ids[i].second];
           score += predicted_feature.MutableQFeatureScore(leverage_to)
@@ -2568,32 +2580,6 @@ class QFeatures {
           best_leverage = leverage_to;
         }
       }
-
-      /*
-      int leverage_sum = 0;
-      int count = 0;
-      for (const pair<double, int>& distance_and_feature_id :
-           distance_and_feature_ids) {
-        int feature_id = distance_and_feature_id.second;
-        PriceDifference best_score = PriceDifference::InRatio(0.5);
-        int best_leverage = 0;
-        for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
-          QFeature& predicted_feature = features_[feature_id];
-          PriceDifference score =
-              predicted_feature.MutableQFeatureScore(leverage_to)
-                               ->GetScore(volatility) +
-              PriceDifference::InRatio(1 - GetParams().spread) *
-              (min(1, abs(leverage_to - leverage)) * abs(leverage_to) * 3.0);
-          if (best_score < score) {
-            best_score = score;
-            best_leverage = leverage_to;
-          }
-        }
-        leverage_sum += best_leverage;
-        if (++count >= 3) { break; }
-        // if (abs(leverage_sum) >= 3) { break; }
-      }
-      */
 
       int next_leverage = best_leverage;
 
@@ -2606,9 +2592,6 @@ class QFeatures {
       leverage = next_leverage;
       asset.Trade(current_price, next_leverage, true);
     }
-    // for (const QFeature& feature : features_) {
-    //   LOG(INFO) << feature.DebugString();
-    // }
   }
 
   void LearnReward(const QFeatureReward& reward, int feature_id, int ratio) {
@@ -2617,13 +2600,11 @@ class QFeatures {
     if (!next_reward.IsValid()) { return; }
 
     QFeature* feature = &features_[feature_id];
-    QFeature* next_feature = &features_[next_reward.GetFeatureIds()[0]];
     for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
       PriceDifference best_score;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         PriceDifference score =
-            next_feature->MutableQFeatureScore(leverage_to)
-                        ->GetScore(next_reward.GetVolatility()) +
+            next_reward.GetScore(leverage_to) +
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage_from)) *
              abs(leverage_to) * 20 +
@@ -2638,41 +2619,58 @@ class QFeatures {
     }
   }
 
-  void Learn(double learning_rate, int ratio) {
-    // for (size_t reward_index = 0;
-    //      reward_index < rewards_[0].size(); reward_index++) {
-    //   for (size_t ratio_index = 0; ratio_index < rewards_.size();
-    //        ratio_index++) {
-    //     CHECK_LT(reward_index, rewards_[ratio_index].size());
-    //     LearnReward(rewards_[ratio_index][reward_index],
-    //                 rewards_[ratio_index][reward_index + 1],
-    //                 ratio);
-    //   }
-    // }
-    size_t next_feature_id = 0;
-    mutex feature_id_mutex;
-    Parallel([&](int) {
-      size_t feature_id;
-      {
-        lock_guard<mutex> feature_id_mutex_guard(feature_id_mutex);
-        feature_id = next_feature_id;
-        if (feature_id >= feature_rewards_.size()) {
-          return false;
+  void CalculateScore() {
+    ParallelFor<size_t>(
+      0 /* begin */, rewards_[0].size() /* end */,
+      1 /* step */, 1440 /* big_step */,
+      [&](size_t reward_id) {
+        for (size_t ratio_id = 0; ratio_id < rewards_.size(); ratio_id++) {
+          CHECK_LT(reward_id, rewards_[ratio_id].size());
+          QFeatureReward* reward = &rewards_[ratio_id][reward_id];
+          if (!reward->IsValid()) {
+            continue;
+          }
+          for (int leverage = -1; leverage <= 1; leverage++) {
+            PriceDifference score = PriceDifference::InRatio(1);
+            for (int feature_id : reward->GetFeatureIds()) {
+              CHECK_LE(0, feature_id);
+              score += features_[feature_id].MutableQFeatureScore(leverage)
+                                            ->GetScore(reward->GetVolatility());
+            }
+            reward->SetScore(leverage, score / reward->GetFeatureIds().size());
+          }
         }
-        next_feature_id++;
+      });
+    int hash = 0;
+    for (size_t ratio_id = 0; ratio_id < rewards_.size(); ratio_id++) {
+      for (const QFeatureReward& reward : rewards_[ratio_id]) {
+        if (!reward.IsValid()) {
+          continue;
+        }
+        for (int leverage = -1; leverage <= 1; leverage++) {
+          PriceDifference score = reward.GetScore(leverage);
+          hash ^= score.GetRawValue();
+        }
       }
+    }
+    LOG(ERROR) << "Hash: " << hash;
+  }
 
-      for (const QFeatureReward* reward : feature_rewards_[feature_id]) {
-        LearnReward(*reward, feature_id, ratio);
-      }
+  void Learn(double learning_rate, int ratio) {
+    CalculateScore();
 
-      for (int leverage = -1; leverage <= 1; leverage++) {
-        features_[feature_id].MutableQFeatureScore(leverage)
-            ->Commit(learning_rate);
-      }
-
-      return true;
-    });
+    ParallelFor<size_t>(
+      0 /* begin */, feature_rewards_.size() /* end */,
+      1 /* step */, 1 /* big_step */,
+      [&](size_t feature_id) {
+        for (const QFeatureReward* reward : feature_rewards_[feature_id]) {
+          LearnReward(*reward, feature_id, ratio);
+        }
+        for (int leverage = -1; leverage <= 1; leverage++) {
+          features_[feature_id].MutableQFeatureScore(leverage)
+              ->Commit(learning_rate);
+        }
+      });
   }
 
  private:
@@ -3210,7 +3208,7 @@ class Simulator {
     // features.Init(feature_config, *training_rates_, 20, 12);
     // features.Init(feature_config, *training_rates_, 48, 24);
     for (double learning_rate = 1; ; learning_rate *= 0.999) {
-      for (int i = 0; i < 50; i++) {
+      for (int i = 0; i < 10; i++) {
         // features.Replay();
         features.Learn(learning_rate * 0.9 + 0.1, 8);
       }
