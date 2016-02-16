@@ -2215,7 +2215,7 @@ struct QFeatureScore {
     sum_ = 0;
   }
 
-  PriceDifference GetScore(Volatility volatility) {
+  PriceDifference GetScore(Volatility volatility) const {
     PriceDifference result;
     double score = score_ + volatility_score_ * sqrt(volatility.GetValue());
     CHECK(!IsNan(score) && !IsInf(score))
@@ -2270,9 +2270,8 @@ struct QFeatureScore {
     CHECK_LT(PriceDifference::InRatio(0.66), reward);
     CHECK_LT(reward, PriceDifference::InRatio(1.5));
 
-    const double kDiscountFactor = 0.99;
     double x = sqrt(volatility.GetValue());
-    double y = reward.GetLogValue() * kDiscountFactor;
+    double y = reward.GetLogValue();
     xy_sum_ += x * y;
     xx_sum_ += x * x;
     x_sum_ += x;
@@ -2318,6 +2317,12 @@ struct QFeature {
   double MeasureDistance(const FeatureConfig& config,
                          const QFeature& feature) const {
     return past_.MeasureDistance(config, feature.past_);
+  }
+
+  const QFeatureScore& GetQFeatureScore(int index) const {
+    CHECK_LE(-1, index);
+    CHECK_LE(index, 1);
+    return score_[index + 1];
   }
 
   QFeatureScore* MutableQFeatureScore(int index) {
@@ -2562,13 +2567,13 @@ class QFeatures {
       }
       sort(distance_and_feature_ids.begin(), distance_and_feature_ids.end());
 
-      PriceDifference best_score = PriceDifference::InRatio(0.5);
+      PriceDifference best_score = PriceDifference::InRatio(0.1);
       int best_leverage = 0;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         PriceDifference score =
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage)) *
-             abs(leverage_to) * kQRedundancy * 1.5);
+             abs(leverage_to) * kQRedundancy);
         for (int i = 0; i < kQRedundancy; i++) {
           QFeature& predicted_feature =
               features_[distance_and_feature_ids[i].second];
@@ -2599,16 +2604,17 @@ class QFeatures {
     const QFeatureReward& next_reward = reward.GetNextReward();
     if (!next_reward.IsValid()) { return; }
 
+    const double kDiscountFactor = 0.95;
     QFeature* feature = &features_[feature_id];
     for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
       PriceDifference best_score;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         PriceDifference score =
-            next_reward.GetScore(leverage_to) +
+            next_reward.GetScore(leverage_to) * kDiscountFactor +
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage_from)) *
-             abs(leverage_to) * 20 +
-             abs(leverage_to - leverage_from) * 0) +
+             abs(leverage_to) +
+             abs(leverage_to - leverage_from) * 30) +
             reward.GetReward(ratio) * leverage_to;
         if (leverage_to == -1 || best_score < score) {
           best_score = score;
@@ -2671,6 +2677,18 @@ class QFeatures {
               ->Commit(learning_rate);
         }
       });
+
+    for (int leverage = -1; leverage <= 1; leverage++) {
+      double sum = 0, count = 0;
+      for (const auto& feature : features_) {
+        sum += feature.GetQFeatureScore(leverage)
+                      .GetScore(Volatility::InRatio(4e-4))
+                      .GetLogValue();
+        count++;
+      }
+      LOG(INFO) << "Score bias: " << StringPrintf("%.6f", sum / count)
+                << " (leverage=" << leverage << ")";
+    }
   }
 
  private:
@@ -3199,20 +3217,21 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void LearnQFeatures() {
-    // const FeatureConfig feature_config({1, 8, 32}, 8);
+    const int kRatio = 4;
     const FeatureConfig feature_config({1, 8, 32}, 8);
+    // const FeatureConfig feature_config({1, 8, 32}, kRatio * 2);
     // const FeatureConfig feature_config({1, 6, 12}, 6);
     QFeatures features;
     // features.Init(feature_config, *training_rates_, 5, 3);
-    features.Init(feature_config, *training_rates_, 10, 6);
+    features.Init(feature_config, *training_rates_, kRatio, kRatio / 2);
     // features.Init(feature_config, *training_rates_, 20, 12);
     // features.Init(feature_config, *training_rates_, 48, 24);
     for (double learning_rate = 1; ; learning_rate *= 0.999) {
       for (int i = 0; i < 10; i++) {
         // features.Replay();
-        features.Learn(learning_rate * 0.9 + 0.1, 8);
+        features.Learn(learning_rate * 0.9 + 0.1, kRatio);
       }
-      features.Simulate(*test_rates_, 8);
+      features.Simulate(*test_rates_, kRatio);
       // features.Simulate(*test_rates_, 16);
     }
   }
