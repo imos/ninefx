@@ -23,6 +23,11 @@ using namespace std;
     TypeName(const TypeName&); \
     void operator=(const TypeName&)
 
+#define COMPARISON_OPERATOR(TypeName) \
+    bool operator >(const TypeName& value) const { return value < *this; } \
+    bool operator >=(const TypeName& value) const { return !(*this < value); } \
+    bool operator <=(const TypeName& value) const { return !(*this > value); }
+
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
 const double kHighAndLowDistanceWeight = 0;
@@ -455,6 +460,8 @@ struct TimeDifference {
     return GetRawValue() < value.GetRawValue();
   }
 
+  COMPARISON_OPERATOR(TimeDifference);
+
   string DebugString() const {
     char buf[50];
     sprintf(buf, "%.1f minute(s)", GetMinute());
@@ -542,12 +549,7 @@ struct Time {
     assert(value.IsValid());
     return time_ < value.time_;
   }
-
-  bool operator<=(Time value) const {
-    assert(IsValid());
-    assert(value.IsValid());
-    return time_ <= value.time_;
-  }
+  COMPARISON_OPERATOR(Time);
 
   TimeDifference operator-(Time base_time) const {
     return TimeDifference((int64_t)time_ - (int64_t)base_time.time_);
@@ -850,11 +852,11 @@ struct Price {
   }
 
   bool operator<(Price value) const {
-    assert(IsValid());
-    assert(value.IsValid());
-
+    CHECK(IsValid());
+    CHECK(value.IsValid());
     return log_price_ < value.log_price_;
   }
+  COMPARISON_OPERATOR(Price);
 
   Price operator+(PriceDifference price_difference) const {
     if (!IsValid()) { return Price::Invalid(); }
@@ -1727,11 +1729,7 @@ struct AdjustedPrice {
     if (!IsValid() || !value.IsValid()) { return false; }
     return GetRawValue() < value.GetRawValue();
   }
-
-  bool operator>(const AdjustedPrice& value) const {
-    if (!IsValid() || !value.IsValid()) { return false; }
-    return GetRawValue() > value.GetRawValue();
-  }
+  COMPARISON_OPERATOR(AdjustedPrice);
 
   void Init(Price price,
             TimeDifference interval,
