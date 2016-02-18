@@ -983,6 +983,7 @@ struct Asset {
     drawdown_ = max(drawdown_, highest_value_ - GetValue(current_price));
     double leverage = GetLeverage(current_price);
     hold_ += (current_time - last_time_) * fabs(leverage);
+    signed_hold_ += (current_time - last_time_) * leverage;
     position_value_ = position_currency_ +
                       current_price.GetRealPrice() * position_foreign_currency_;
     position_foreign_currency_ =
@@ -1027,6 +1028,8 @@ struct Asset {
     return StringPrintf("max drawdown: %.1f%%, ", drawdown_ * 100) +
            StringPrintf("hold time: %.2f days, ",
                         hold_.GetMinute() / 60 / 24) +
+           StringPrintf("leverage: %.2f, ",
+                        signed_hold_.GetMinute() / hold_.GetMinute()) +
            StringPrintf("base value: %.6f", position_value_);
   }
 
@@ -1041,6 +1044,7 @@ struct Asset {
   double highest_value_;
   double drawdown_;
   TimeDifference hold_;
+  TimeDifference signed_hold_;
   double position_value_;
   double position_currency_;
   double position_foreign_currency_;
@@ -2540,7 +2544,7 @@ class QFeatures {
 
     vector<int> ratios;
     for (int r = ratio - ratio_range; r <= ratio + ratio_range;
-         r += ratio_range / 2) {
+         r += max(1, ratio_range / 2)) {
       ratios.push_back(r);
     }
     TimeIterator iterator(
@@ -2668,7 +2672,7 @@ class QFeatures {
     const QFeatureReward& next_reward = reward.GetNextReward();
     if (!next_reward.IsValid()) { return; }
 
-    const double kDiscountFactor = 0.95;
+    const double kDiscountFactor = 0.97;
     QFeature* feature = &features_[feature_id];
     for (int leverage_from = -1; leverage_from <= 1; leverage_from++) {
       PriceDifference best_score;
@@ -3281,10 +3285,10 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void LearnQFeatures() {
-    const int kRatio = 2;
-    // const FeatureConfig feature_config({1, 8, 32}, 8);
+    const int kRatio = 4;
+    const FeatureConfig feature_config({1, 8, 32}, 8);
     // const FeatureConfig feature_config({1, 8, 32}, kRatio * 2);
-    const FeatureConfig feature_config({1, 6, 12}, 6);
+    // const FeatureConfig feature_config({1, 6, 12}, 6);
     QFeatures features;
     // features.Init(feature_config, *training_rates_, 5, 3);
     features.Init(feature_config, *training_rates_, kRatio, kRatio / 2);
