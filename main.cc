@@ -456,6 +456,22 @@ struct TimeDifference {
     return TimeDifference(time_difference_ - value.time_difference_);
   }
 
+  TimeDifference operator+(const TimeDifference& value) const {
+    TimeDifference result;
+    result.SetRawValue(GetRawValue() + value.GetRawValue());
+    return result;
+  }
+
+  const TimeDifference& operator+=(const TimeDifference& value) {
+    return *this = *this + value;
+  }
+
+  TimeDifference operator*(double value) const {
+    TimeDifference result;
+    result.SetRawValue(round(GetRawValue() * value));
+    return result;
+  }
+
   bool operator<(TimeDifference value) const {
     return GetRawValue() < value.GetRawValue();
   }
@@ -798,7 +814,7 @@ struct PriceDifference {
     return result;
   }
 
-  const PriceDifference& operator+=(PriceDifference value) {
+  const PriceDifference& operator+=(const PriceDifference& value) {
     *this = *this + value;
     return *this;
   }
@@ -955,9 +971,33 @@ struct Asset {
   Asset() : currency_(1.0),
             foreign_currency_(0.0),
             trade_(0.0),
-            total_fee_(0.0) {}
+            total_fee_(0.0),
+            highest_value_(1.0),
+            drawdown_(0.0),
+            position_value_(1.0),
+            position_currency_(1.0),
+            position_foreign_currency_(0.0) {}
 
-  void Trade(Price current_price, double leverage, bool use_spread = false) {
+  void UpdateStats(Time current_time, Price current_price) {
+    highest_value_ = max(highest_value_, GetValue(current_price));
+    drawdown_ = max(drawdown_, highest_value_ - GetValue(current_price));
+    double leverage = GetLeverage(current_price);
+    hold_ += (current_time - last_time_) * fabs(leverage);
+    position_value_ = position_currency_ +
+                      current_price.GetRealPrice() * position_foreign_currency_;
+    position_foreign_currency_ =
+        position_value_ * fabs(leverage) / current_price.GetRealPrice();
+    position_currency_ =
+        position_value_ -
+        position_foreign_currency_ * current_price.GetRealPrice();
+
+    last_time_ = current_time;
+  }
+
+  void Trade(Time current_time,
+             Price current_price,
+             double leverage,
+             bool use_spread = false) {
     double value = GetValue(current_price);
     double last_currency = currency_;
     foreign_currency_ = value * leverage / current_price.GetRealPrice();
@@ -968,6 +1008,7 @@ struct Asset {
       total_fee_ += fee;
     }
     trade_ += fabs(last_currency - currency_);
+    UpdateStats(current_time, current_price);
   }
 
   double GetValue(Price current_price) const {
@@ -982,11 +1023,27 @@ struct Asset {
     return 1 - currency_ / GetValue(current_price);
   }
 
+  string Stats() const {
+    return StringPrintf("max drawdown: %.1f%%, ", drawdown_ * 100) +
+           StringPrintf("hold time: %.2f days, ",
+                        hold_.GetMinute() / 60 / 24) +
+           StringPrintf("base value: %.6f", position_value_);
+  }
+
  private:
   double currency_;
   double foreign_currency_;
   double trade_;
   double total_fee_;
+
+  // 統計情報
+  Time last_time_;
+  double highest_value_;
+  double drawdown_;
+  TimeDifference hold_;
+  double position_value_;
+  double position_currency_;
+  double position_foreign_currency_;
 };
 
 struct VolatilityRatio {
@@ -2532,9 +2589,17 @@ class QFeatures {
     int leverage = 0;
     Asset asset;
     Price last_price;
+    int last_week_index = 0;
     for (Time now = rates.GetStartTime(); now < rates.GetEndTime();
          now.AddMinute(1)) {
       Price current_price = rates.GetRate(now, now).GetClosePrice();
+      if (current_price.IsValid() && last_week_index != now.GetWeekIndex()) {
+        LOG(INFO) << now.DebugString() << "\t"
+                  << StringPrintf("%.6f\t", asset.GetValue(current_price))
+                  << current_price.DebugString();
+        last_week_index = now.GetWeekIndex();
+      }
+
       // 最初に有効な価格が設定されるまでは何もしない
       if (!last_price.IsValid()) {
         if (current_price.IsValid()) {
@@ -2551,7 +2616,7 @@ class QFeatures {
           !volatility.IsValid() ||
           !current_price.IsValid()) {
         leverage = 0;
-        asset.Trade(last_price, 0, true);
+        asset.Trade(now, last_price, 0, true);
         continue;
       }
       last_price = current_price;
@@ -2587,14 +2652,15 @@ class QFeatures {
       int next_leverage = best_leverage;
 
       if (leverage != next_leverage) {
-        LOG(INFO) << now.DebugString() << ": "
-                  << current_price.DebugString() << ": "
-                  << StringPrintf("%.6f", asset.GetValue(current_price))
-                  << StringPrintf(": %+d => %+d", leverage, next_leverage);
+        VLOG(1) << now.DebugString() << ": "
+                << current_price.DebugString() << ": "
+                << StringPrintf("%.6f", asset.GetValue(current_price))
+                << StringPrintf(": %+d => %+d", leverage, next_leverage);
       }
       leverage = next_leverage;
-      asset.Trade(current_price, next_leverage, true);
+      asset.Trade(now, current_price, next_leverage, true);
     }
+    LOG(INFO) << asset.Stats();
   }
 
   void LearnReward(const QFeatureReward& reward, int feature_id, int ratio) {
@@ -3215,10 +3281,10 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void LearnQFeatures() {
-    const int kRatio = 4;
-    const FeatureConfig feature_config({1, 8, 32}, 8);
+    const int kRatio = 2;
+    // const FeatureConfig feature_config({1, 8, 32}, 8);
     // const FeatureConfig feature_config({1, 8, 32}, kRatio * 2);
-    // const FeatureConfig feature_config({1, 6, 12}, 6);
+    const FeatureConfig feature_config({1, 6, 12}, 6);
     QFeatures features;
     // features.Init(feature_config, *training_rates_, 5, 3);
     features.Init(feature_config, *training_rates_, kRatio, kRatio / 2);
@@ -3395,13 +3461,13 @@ class Simulator {
       Price current_price = test_rates_->GetRate(now, now).GetClosePrice();
       if (!current_price.IsValid()) { continue; }
 
-      base_asset.Trade(current_price, 0.5);
+      base_asset.Trade(now, current_price, 0.5);
 
       // 次の時刻の価格が存在しなければ強制決済
       if (!test_rates_->GetRate(
               now + TimeDifference::InMinute(1),
               now + TimeDifference::InMinute(1)).GetClosePrice().IsValid()) {
-        asset.Trade(current_price, 0, true /* use_spread */);
+        asset.Trade(now, current_price, 0, true /* use_spread */);
         printf("%s: %s:\n",
                now.DebugString().c_str(),
                test_rates_->GetRate(now, now)
@@ -3441,7 +3507,7 @@ class Simulator {
         continue;
       }
 
-      asset.Trade(current_price, target_position, true /* use_spread */);
+      asset.Trade(now, current_price, target_position, true /* use_spread */);
 
       printf("%s: %s:\n",
              now.DebugString().c_str(),
@@ -3474,8 +3540,8 @@ class Simulator {
             now + TimeDifference::InMinute(1),
             now + TimeDifference::InMinute(1)).GetClosePrice().IsValid()) {
       TradeState state = current_state.get();
-      state.base_asset.Trade(current_price, 0.5);
-      state.asset.Trade(current_price, 0, true /* use_spread */);
+      state.base_asset.Trade(now, current_price, 0.5);
+      state.asset.Trade(now, current_price, 0, true /* use_spread */);
       return state;
     }
 
@@ -3517,10 +3583,10 @@ class Simulator {
 
     TradeState state = current_state.get();
     double current_leverage = state.asset.GetLeverage(current_price);
-    state.base_asset.Trade(current_price, 0.5);
+    state.base_asset.Trade(now, current_price, 0.5);
     double leverage = target_leverage;
     leverage = max(-1.0, min(1.0, leverage));
-    state.asset.Trade(current_price, leverage, true /* use_spread */);
+    state.asset.Trade(now, current_price, leverage, true /* use_spread */);
     state.output = StringPrintf(
         "%.5f[%.3f] (%.3f => %.3f)",
         state.asset.GetValue(current_price),
