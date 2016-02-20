@@ -814,6 +814,12 @@ struct PriceDifference {
     return result;
   }
 
+  PriceDifference operator-(PriceDifference value) const {
+    PriceDifference result;
+    result.SetRawValue(GetRawValue() - value.GetRawValue());
+    return result;
+  }
+
   const PriceDifference& operator+=(const PriceDifference& value) {
     *this = *this + value;
     return *this;
@@ -1636,7 +1642,12 @@ class AccumulatedRates {
 
   string DebugString() {
     return "AccumulatedRates for " + name_ + ": " +
-           GetRate(start_time_, end_time_).DebugString();
+           GetRate(start_time_, end_time_).DebugString() + ", " +
+           "volatility: " +
+           volatility_sum_.Query(GetDenseIndexOrNext(GetStartTime()),
+                                 GetDenseIndexOrPrevious(GetEndTime()))
+                          .GetAverageVolatility()
+                          .DebugString();
   }
 
   static void Test() {
@@ -2640,7 +2651,7 @@ class QFeatures {
         PriceDifference score =
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage)) *
-             abs(leverage_to) * kQRedundancy);
+             abs(leverage_to) * kQRedundancy * 1.0);
         for (int i = 0; i < kQRedundancy; i++) {
           QFeature& predicted_feature =
               features_[distance_and_feature_ids[i].second];
@@ -2750,7 +2761,7 @@ class QFeatures {
       double sum = 0, count = 0;
       for (const auto& feature : features_) {
         sum += feature.GetQFeatureScore(leverage)
-                      .GetScore(Volatility::InRatio(4e-4))
+                      .GetScore(Volatility::InRatio(1.5e-4))
                       .GetLogValue();
         count++;
       }
