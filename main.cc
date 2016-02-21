@@ -1071,8 +1071,9 @@ struct VolatilityRatio {
 struct Volatility {
  public:
   // 2乗を保存するためのスケール
-  // (e.g. 2 pips の変動は 20000^2 / kVolatilityScale として保存されます．)
-  static const int32_t kVolatilityScale = 10000;
+  // (e.g. 2 pips の変動は 20000^2 / kVolatilityScaleDeprecated として保存されます．)
+  static constexpr double kVolatilityScale = 1000000;
+  static const int32_t kVolatilityScaleDeprecated = 10000;
 
   Volatility() : volatility_(-1) {}
 
@@ -1090,17 +1091,34 @@ struct Volatility {
     return volatility_ >= 0;
   }
 
-  void SetValueDeprecated(double value) {
+  void SetValue(double value) {
+    value = pow(value * kVolatilityScale, 2.0);
     CHECK(!IsNan(value));
     CHECK(!IsInf(value));
-    CHECK_GE(value / kVolatilityScale, numeric_limits<int32_t>::min());
-    CHECK_LE(value / kVolatilityScale, numeric_limits<int32_t>::max());
     CHECK_GE(value, 0);
-    volatility_ = (int32_t)round(value / kVolatilityScale);
+    CHECK_LE(value, numeric_limits<int32_t>::max());
+    volatility_ = static_cast<int32_t>(round(value));
+  }
+
+  double GetValue() const {
+    return sqrt(volatility_) / kVolatilityScale;
+  }
+
+  void SetValueDeprecated(double value) {
+    SetValue(sqrt(value / kVolatilityScaleDeprecated) / kVolatilityScale);
+    // CHECK(!IsNan(value));
+    // CHECK(!IsInf(value));
+    // CHECK_GE(value / kVolatilityScaleDeprecated,
+    //          numeric_limits<int32_t>::min());
+    // CHECK_LE(value / kVolatilityScaleDeprecated,
+    //          numeric_limits<int32_t>::max());
+    // CHECK_GE(value, 0);
+    // volatility_ = (int32_t)round(value / kVolatilityScaleDeprecated);
   }
 
   double GetValueDeprecated() const {
-    return static_cast<double>(volatility_) * kVolatilityScale;
+    return pow(GetValue() * kVolatilityScale, 2) * kVolatilityScaleDeprecated;
+    // return static_cast<double>(volatility_) * kVolatilityScaleDeprecated;
   }
 
   int32_t GetRawValue() const { return volatility_; }
@@ -1113,17 +1131,14 @@ struct Volatility {
   Price GetPrice(Price current_price,
                  TimeDifference time_difference,
                  double ratio) const {
-    Price result;
-    result.SetLogPrice(
-        current_price.GetLogPrice() +
-        sqrt(GetValueDeprecated() * time_difference.GetMinute()) * ratio);
-    return result;
+    PriceDifference price_difference;
+    price_difference.SetLogValue(
+        GetValue() * sqrt(time_difference.GetMinute()) * ratio);
+    return current_price + price_difference;
   }
 
   string DebugString() const {
-    char buf[50];
-    sprintf(buf, "%.6f", sqrt(GetValueDeprecated()));
-    return buf;
+    return StringPrintf("%.6f", GetValue());
   }
 
   static Volatility Invalid() {
@@ -1131,14 +1146,15 @@ struct Volatility {
   }
 
   static Volatility InRatio(double ratio) {
-    double log_ratio = ratio * 1e8;
-    return Volatility(log_ratio * log_ratio);
+    Volatility result;
+    result.SetValue(ratio);
+    return result;
   }
 
   static void Test() {
     fprintf(stderr, "Testing Volatility...\n");
 
-    // ボラティリティ解像度を確認（）
+    // ボラティリティ解像度を確認
     {
       Volatility volatility;
       volatility.SetRawValue(1);
@@ -1156,13 +1172,45 @@ struct Volatility {
       // TODO(imos): 表現できていないので要修正
       CHECK_GT((ratio - 1) * sqrt(numeric_limits<int32_t>::max()), 0.3);
     }
+
+    // 入出力を確認
+    {
+      Volatility volatility;
+      volatility.SetValue(0.001);
+      double value = volatility.GetValue();
+      CHECK(fabs(value - 0.001) < 1e-7) << "Inconsistent interface: " << value;
+    }
+
+    // 入出力を確認
+    {
+      Volatility volatility;
+      volatility.SetValue(0.001);
+      double ratio = volatility.GetPrice(Price::InRealPrice(1.0),
+                                         TimeDifference::InMinute(1),
+                                         1.0).GetRealPrice();
+      CHECK(fabs(ratio - 1.001) < 1e-5) << "Inconsistent interface: " << ratio;
+    }
+
+    // 入出力を確認
+    {
+      Volatility volatility;
+      volatility.SetValueDeprecated(10000);
+      double value = volatility.GetValueDeprecated();
+      CHECK(fabs(value - 10000) < 1e-3) << "Inconsistent interface: " << value;
+    }
+
+    // 後方互換性の確認
+    {
+      CHECK_EQ(1000000, Volatility::InRatio(0.001).GetRawValue());
+      CHECK_EQ(4000000, Volatility::InRatio(0.002).GetRawValue());
+    }
   }
 
  private:
   Volatility(double volatility)
-      : volatility_((int32_t)round(volatility / kVolatilityScale)) {
+      : volatility_((int32_t)round(volatility / kVolatilityScaleDeprecated)) {
     assert(volatility >= 0);
-    assert(round(volatility / kVolatilityScale) <= 0x7fffffff);
+    assert(round(volatility / kVolatilityScaleDeprecated) <= 0x7fffffff);
   }
 
   int32_t volatility_;
@@ -1472,15 +1520,15 @@ class DailyVolatility {
       if (times.size() < 60 * 24 * 7 / 2) { continue; }
       int time_index = times.back().GetMinuteIndex() % (60 * 24);
       assert(0 <= time_index);
-      double current_volatility = volatilities.back().GetValueDeprecated();
+      double current_volatility = volatilities.back().GetValue();
       assert(current_volatility >= 0);
       assert(!IsNan(current_volatility) && !IsInf(current_volatility));
       double average_volatility =
-          sum.GetAverageVolatility().GetValueDeprecated();
+          sum.GetAverageVolatility().GetValue();
       assert(average_volatility >= 0);
       assert(!IsNan(average_volatility) && !IsInf(average_volatility));
       daily_volatility_sum[(size_t)time_index]
-          += pow(current_volatility / average_volatility, 1 / 2.0);
+          += current_volatility / average_volatility;
       daily_volatility_count[(size_t)time_index]++;
     }
     vector<double> daily_volatility;
@@ -1845,6 +1893,9 @@ struct AdjustedPrice {
             Price base_price,
             Volatility volatility,
             double ratio = 1.0) {
+    // double value =
+    //     (price - base_price) * ratio / sqrt(fabs(interval.GetMinute()))
+    //     / volatility.GetValue();
     double value = round((price.GetLogPrice() - base_price.GetLogPrice())
                          * ratio
                          / sqrt(fabs(interval.GetMinute()))
@@ -2050,9 +2101,6 @@ struct AdjustedPrice {
 
 struct AdjustedPriceStat {
  public:
-  static constexpr double kBaseAdjustedPrice =
-      static_cast<double>(AdjustedPrice::kBaseAdjustedPrice);
-
   AdjustedPriceStat()
       : adjusted_price_count_(0),
         adjusted_price_sum_(0),
@@ -3710,8 +3758,8 @@ void Test() {
   fprintf(stderr, "sizeof(PriceSum): %lu\n", sizeof(PriceSum));
   SegmentTree<int32_t, const int32_t&, max<int32_t>>::Test();
   AccumulatedRates::Test();
-  AdjustedPrice::Test();
   Volatility::Test();
+  AdjustedPrice::Test();
 }
 
 int main(int argc, char** argv) {
