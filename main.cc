@@ -1087,14 +1087,24 @@ struct Volatility {
   }
 
   Volatility operator*(VolatilityRatio ratio) const {
-    return Volatility(GetValue() * ratio.GetValue() * ratio.GetValue());
+    return Volatility(
+        GetValueDeprecated() * ratio.GetValue() * ratio.GetValue());
   }
 
   bool IsValid() const {
     return volatility_ >= 0;
   }
 
-  double GetValue() const {
+  void SetValueDeprecated(double value) {
+    CHECK(!IsNan(value));
+    CHECK(!IsInf(value));
+    CHECK_GE(value / kVolatilityScale, numeric_limits<int32_t>::min());
+    CHECK_LE(value / kVolatilityScale, numeric_limits<int32_t>::max());
+    CHECK_GE(value, 0);
+    volatility_ = (int32_t)round(value / kVolatilityScale);
+  }
+
+  double GetValueDeprecated() const {
     return static_cast<double>(volatility_) * kVolatilityScale;
   }
 
@@ -1111,13 +1121,13 @@ struct Volatility {
     Price result;
     result.SetLogPrice(
         current_price.GetLogPrice() +
-        sqrt(GetValue() * time_difference.GetMinute()) * ratio);
+        sqrt(GetValueDeprecated() * time_difference.GetMinute()) * ratio);
     return result;
   }
 
   string DebugString() const {
     char buf[50];
-    sprintf(buf, "%.6f", sqrt(GetValue()));
+    sprintf(buf, "%.6f", sqrt(GetValueDeprecated()));
     return buf;
   }
 
@@ -1459,10 +1469,11 @@ class DailyVolatility {
       if (times.size() < 60 * 24 * 7 / 2) { continue; }
       int time_index = times.back().GetMinuteIndex() % (60 * 24);
       assert(0 <= time_index);
-      double current_volatility = volatilities.back().GetValue();
+      double current_volatility = volatilities.back().GetValueDeprecated();
       assert(current_volatility >= 0);
       assert(!IsNan(current_volatility) && !IsInf(current_volatility));
-      double average_volatility = sum.GetAverageVolatility().GetValue();
+      double average_volatility =
+          sum.GetAverageVolatility().GetValueDeprecated();
       assert(average_volatility >= 0);
       assert(!IsNan(average_volatility) && !IsInf(average_volatility));
       daily_volatility_sum[(size_t)time_index]
@@ -1834,7 +1845,7 @@ struct AdjustedPrice {
     double value = round((price.GetLogPrice() - base_price.GetLogPrice())
                          * ratio
                          / sqrt(fabs(interval.GetMinute()))
-                         / volatility.GetValue()
+                         / volatility.GetValueDeprecated()
                          * kBaseAdjustedPrice);
     assert(numeric_limits<int32_t>::min() <= value &&
            value <= numeric_limits<int32_t>::max());
@@ -1964,7 +1975,7 @@ struct AdjustedPrice {
                  Volatility volatility) const {
     double price_difference =
         (double)adjusted_price_ / kBaseAdjustedPrice
-                                * volatility.GetValue()
+                                * volatility.GetValueDeprecated()
                                 * sqrt(fabs(interval.GetMinute()));
     double log_price = round(base_price.GetLogPrice() + price_difference);
     if (IsNan(log_price) || IsInf(log_price) ||
@@ -2310,7 +2321,8 @@ struct QFeatureScore {
 
   PriceDifference GetScore(Volatility volatility) const {
     PriceDifference result;
-    double score = score_ + volatility_score_ * sqrt(volatility.GetValue());
+    double score =
+        score_ + volatility_score_ * sqrt(volatility.GetValueDeprecated());
     CHECK(!IsNan(score) && !IsInf(score))
         << "Invalid score: " << score << ", " << DebugString();
     CHECK_GE(score * PriceDifference::kLogPriceRatio,
@@ -2363,7 +2375,7 @@ struct QFeatureScore {
     CHECK_LT(PriceDifference::InRatio(0.66), reward);
     CHECK_LT(reward, PriceDifference::InRatio(1.5));
 
-    double x = sqrt(volatility.GetValue());
+    double x = sqrt(volatility.GetValueDeprecated());
     double y = reward.GetLogValue();
     xy_sum_ += x * y;
     xx_sum_ += x * x;
