@@ -2457,7 +2457,7 @@ struct QFeatureScore {
   PriceDifference GetScore(Volatility volatility) const {
     PriceDifference result;
     double score =
-        score_ + volatility_score_ * sqrt(volatility.GetValueDeprecated());
+        score_ + volatility_score_ * volatility.GetValue();
     CHECK(!IsNan(score) && !IsInf(score))
         << "Invalid score: " << score << ", " << DebugString();
     CHECK_GE(score * PriceDifference::kLogPriceRatio,
@@ -2510,7 +2510,7 @@ struct QFeatureScore {
     CHECK_LT(PriceDifference::InRatio(0.66), reward);
     CHECK_LT(reward, PriceDifference::InRatio(1.5));
 
-    double x = sqrt(volatility.GetValueDeprecated());
+    double x = volatility.GetValue();
     double y = reward.GetLogValue();
     xy_sum_ += x * y;
     xx_sum_ += x * x;
