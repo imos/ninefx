@@ -28,6 +28,21 @@ using namespace std;
     bool operator >=(const TypeName& value) const { return !(*this < value); } \
     bool operator <=(const TypeName& value) const { return !(*this > value); }
 
+#define MULTIPLICATION_OPERATOR(TypeName) \
+    TypeName operator*=(double ratio) {                                        \
+      CHECK(!IsNan(ratio)); CHECK(!IsInf(ratio));                              \
+      SetRawValue(CastWithBoundaryCheck<int64_t>(GetRawValue() * ratio));      \
+      return *this;                                                            \
+    }                                                                          \
+    TypeName operator*(double ratio) const                                     \
+        { TypeName result = *this; result *= ratio; return result; }           \
+    TypeName operator/=(double ratio) { return *this *= 1 / ratio; }           \
+    TypeName operator/(double ratio) const { return *this * (1 / ratio); }
+
+// 2016年2月21日以前に存在したボラティリティの計算バグを有効にする
+// TODO(imos): バグがスコアに寄与していないことを確認した後に削除する．
+const bool kEnableVolatilityBug = false;
+
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
 const double kHighAndLowDistanceWeight = 0;
@@ -50,6 +65,15 @@ bool IsNan(double value) {
 
 bool IsInf(double value) {
   return ::std::isinf(value);
+}
+
+template<typename T>
+T CastWithBoundaryCheck(double value) {
+  CHECK(!IsInf(value));
+  CHECK(!IsNan(value));
+  CHECK_GE(value, numeric_limits<T>::min());
+  CHECK_LE(value, numeric_limits<T>::max());
+  return static_cast<T>(value);
 }
 
 string StringPrintf(const char* const format, ...) {
@@ -798,15 +822,16 @@ struct PriceDifference {
     return result;
   }
 
-  PriceDifference operator*(double ratio) const {
-    PriceDifference result;
-    result.SetRawValue(static_cast<int64_t>(round(GetRawValue() * ratio)));
-    return result;
-  }
+  MULTIPLICATION_OPERATOR(PriceDifference);
+  // PriceDifference operator*(double ratio) const {
+  //   PriceDifference result;
+  //   result.SetRawValue(static_cast<int64_t>(round(GetRawValue() * ratio)));
+  //   return result;
+  // }
 
-  PriceDifference operator/(double ratio) const {
-    return *this * (1 / ratio);
-  }
+  // PriceDifference operator/(double ratio) const {
+  //   return *this * (1 / ratio);
+  // }
 
   PriceDifference operator+(PriceDifference value) const {
     PriceDifference result;
@@ -1138,7 +1163,7 @@ struct Volatility {
   }
 
   string DebugString() const {
-    return StringPrintf("%.6f", GetValue());
+    return StringPrintf("%.6f%%", GetValue() * 100);
   }
 
   static Volatility Invalid() {
@@ -1878,7 +1903,9 @@ class AccumulatedRates {
 struct AdjustedPrice {
  public:
   static constexpr int32_t kInvalidPrice = 0x7fffffff;
+  // TODO(imos): 削除する．
   static constexpr double kBaseAdjustedPrice = 100000000;
+  static constexpr double kAdjustedPriceScale = 10000;
 
   AdjustedPrice() : adjusted_price_(kInvalidPrice) {}
 
@@ -1893,17 +1920,27 @@ struct AdjustedPrice {
             Price base_price,
             Volatility volatility,
             double ratio = 1.0) {
-    // double value =
-    //     (price - base_price) * ratio / sqrt(fabs(interval.GetMinute()))
-    //     / volatility.GetValue();
-    double value = round((price.GetLogPrice() - base_price.GetLogPrice())
-                         * ratio
-                         / sqrt(fabs(interval.GetMinute()))
-                         / volatility.GetValueDeprecated()
-                         * kBaseAdjustedPrice);
-    assert(numeric_limits<int32_t>::min() <= value &&
-           value <= numeric_limits<int32_t>::max());
-    adjusted_price_ = (int32_t)value;
+    if (kEnableVolatilityBug) {
+      double value = round((price.GetLogPrice() - base_price.GetLogPrice())
+                           * ratio
+                           / sqrt(fabs(interval.GetMinute()))
+                           / volatility.GetValueDeprecated()
+                           * kBaseAdjustedPrice);
+      assert(numeric_limits<int32_t>::min() <= value &&
+             value <= numeric_limits<int32_t>::max());
+      adjusted_price_ = (int32_t)value;
+      return;
+    }
+    PriceDifference price_difference = price - base_price;
+    price_difference *= ratio;
+    price_difference /= sqrt(fabs(interval.GetMinute()));
+    price_difference /= volatility.GetValue();
+    double value = price_difference.GetLogValue() * kAdjustedPriceScale;
+    CHECK(!IsNan(value));
+    CHECK(!IsInf(value));
+    CHECK_GE(value, numeric_limits<int32_t>::min());
+    CHECK_LE(value, numeric_limits<int32_t>::max());
+    adjusted_price_ = static_cast<int32_t>(value);
   }
 
   bool InitFuture(const AccumulatedRates& rates,
@@ -2027,21 +2064,28 @@ struct AdjustedPrice {
   Price GetPrice(TimeDifference interval,
                  Price base_price,
                  Volatility volatility) const {
-    double price_difference =
-        (double)adjusted_price_ / kBaseAdjustedPrice
-                                * volatility.GetValueDeprecated()
-                                * sqrt(fabs(interval.GetMinute()));
-    double log_price = round(base_price.GetLogPrice() + price_difference);
-    if (IsNan(log_price) || IsInf(log_price) ||
-        log_price < numeric_limits<int32_t>::min() ||
-        log_price > numeric_limits<int32_t>::max()) {
-      LOG(FATAL)
-          << "Invalid price: " << log_price << ", "
-          << "time_difference: " << interval.DebugString() << ", "
-          << "base_price: " << base_price.DebugString() << ", "
-          << "volatility: " << volatility.DebugString();
+    if (kEnableVolatilityBug) {
+      double price_difference =
+          (double)adjusted_price_ / kBaseAdjustedPrice
+                                  * volatility.GetValueDeprecated()
+                                  * sqrt(fabs(interval.GetMinute()));
+      double log_price = round(base_price.GetLogPrice() + price_difference);
+      if (IsNan(log_price) || IsInf(log_price) ||
+          log_price < numeric_limits<int32_t>::min() ||
+          log_price > numeric_limits<int32_t>::max()) {
+        LOG(FATAL)
+            << "Invalid price: " << log_price << ", "
+            << "time_difference: " << interval.DebugString() << ", "
+            << "base_price: " << base_price.DebugString() << ", "
+            << "volatility: " << volatility.DebugString();
+      }
+      return Price(static_cast<int32_t>(log_price));
     }
-    return Price(static_cast<int32_t>(log_price));
+    PriceDifference price_difference;
+    price_difference.SetLogValue(adjusted_price_ / kAdjustedPriceScale);
+    price_difference *= sqrt(fabs(interval.GetMinute()));
+    price_difference *= volatility.GetValue();
+    return base_price + price_difference;
   }
 
   // 表示用
@@ -2107,29 +2151,31 @@ struct AdjustedPrice {
               Price::InRealPrice(100),
               Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
           100.01,
-          1e-6);
+          1e-4);
       CHECK_NEAR(
           price.GetPrice(
               TimeDifference::InMinute(1.0),
               Price::InRealPrice(200),
               Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
           200.02,
-          1e-6);
+          1e-4);
       CHECK_NEAR(
           price.GetPrice(
               TimeDifference::InMinute(4.0),
               Price::InRealPrice(100),
               Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
           100.02,
-          1e-6);
+          1e-4);
       // TODO(imos): このテストが通るように修正を行う
-      // CHECK_NEAR(
-      //     price.GetPrice(
-      //         TimeDifference::InMinute(1.0),
-      //         Price::InRealPrice(100),
-      //         Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
-      //     100.02,
-      //     1e-6);
+      if (!kEnableVolatilityBug) {
+        CHECK_NEAR(
+            price.GetPrice(
+                TimeDifference::InMinute(1.0),
+                Price::InRealPrice(100),
+                Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
+            100.02,
+            1e-4);
+      }
     }
   }
 
