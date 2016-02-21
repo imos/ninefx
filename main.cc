@@ -2093,6 +2093,44 @@ struct AdjustedPrice {
       // exp(10) が表現可能であるかどうか
       CHECK_GT((ratio - 1) * numeric_limits<int32_t>::max(), 10);
     }
+
+    // 価格の復元
+    {
+      AdjustedPrice price;
+      price.Init(Price::InRealPrice(100.01),
+                 TimeDifference::InMinute(1.0),
+                 Price::InRealPrice(100),
+                 Volatility::InRatio(log(100.01 / 100)));
+      CHECK_NEAR(
+          price.GetPrice(
+              TimeDifference::InMinute(1.0),
+              Price::InRealPrice(100),
+              Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+          100.01,
+          1e-6);
+      CHECK_NEAR(
+          price.GetPrice(
+              TimeDifference::InMinute(1.0),
+              Price::InRealPrice(200),
+              Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+          200.02,
+          1e-6);
+      CHECK_NEAR(
+          price.GetPrice(
+              TimeDifference::InMinute(4.0),
+              Price::InRealPrice(100),
+              Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+          100.02,
+          1e-6);
+      // TODO(imos): このテストが通るように修正を行う
+      // CHECK_NEAR(
+      //     price.GetPrice(
+      //         TimeDifference::InMinute(1.0),
+      //         Price::InRealPrice(100),
+      //         Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
+      //     100.02,
+      //     1e-6);
+    }
   }
 
  private:
