@@ -1402,7 +1402,9 @@ class Rates {
           (current_price.GetLogPrice()
            - previous_price.GetLogPrice()) / scale_factor;
       assert(!IsNan(price_difference) && !IsInf(price_difference));
-      sum += Volatility(price_difference * price_difference);
+      Volatility volatility;
+      volatility.SetValueDeprecated(price_difference * price_difference);
+      sum += volatility;
     }
     assert(sum.GetCount() == kShortVolatilityDuration);
     return sum.GetAverageVolatility();
