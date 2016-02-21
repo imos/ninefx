@@ -1130,6 +1130,29 @@ struct Volatility {
     return Volatility(log_ratio * log_ratio);
   }
 
+  static void Test() {
+    fprintf(stderr, "Testing Volatility...\n");
+
+    // ボラティリティ解像度を確認（）
+    {
+      Volatility volatility;
+      volatility.SetRawValue(1);
+      double ratio = volatility.GetPrice(Price::InRealPrice(1.0),
+                                         TimeDifference::InMinute(60),
+                                         1.0).GetRealPrice();
+      fprintf(stderr, "- Minimal resolution: %.3e\n", ratio - 1);
+      fprintf(stderr, "- Maximal resolution: %.3e\n",
+              (ratio - 1) * sqrt(numeric_limits<int32_t>::max()));
+      CHECK_LE(1, ratio);
+      // 0.1pipsの差が表現可能であるか
+      CHECK_LE(ratio, 1.00001) << "Volatility cannot represents 0.1 pips "
+                               << "difference in 60 minutes.";
+      // exp(10) が表現可能であるかどうか
+      // TODO(imos): 表現できていないので要修正
+      CHECK_GT((ratio - 1) * sqrt(numeric_limits<int32_t>::max()), 0.3);
+    }
+  }
+
  private:
   int32_t volatility_;
 };
@@ -3673,6 +3696,7 @@ void Test() {
   SegmentTree<int32_t, const int32_t&, max<int32_t>>::Test();
   AccumulatedRates::Test();
   AdjustedPrice::Test();
+  Volatility::Test();
 }
 
 int main(int argc, char** argv) {
