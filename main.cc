@@ -1075,11 +1075,6 @@ struct Volatility {
   static const int32_t kVolatilityScale = 10000;
 
   Volatility() : volatility_(-1) {}
-  Volatility(double volatility)
-      : volatility_((int32_t)round(volatility / kVolatilityScale)) {
-    assert(volatility >= 0);
-    assert(round(volatility / kVolatilityScale) <= 0x7fffffff);
-  }
 
   VolatilityRatio operator/(Volatility value) const {
     return VolatilityRatio(
@@ -1164,6 +1159,12 @@ struct Volatility {
   }
 
  private:
+  Volatility(double volatility)
+      : volatility_((int32_t)round(volatility / kVolatilityScale)) {
+    assert(volatility >= 0);
+    assert(round(volatility / kVolatilityScale) <= 0x7fffffff);
+  }
+
   int32_t volatility_;
 };
 
