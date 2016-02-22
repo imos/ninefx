@@ -4,12 +4,12 @@ source "$(dirname "${BASH_SOURCE}")/imosh" || exit 1
 IMOSH_PREDICATE=1 eval "${IMOSH_INIT}"
 
 sync() {
-  rsync -az --delete -e "ssh -i ${HOME}/.ssh/ec2-tokyo.pem" \
+  rsync -az --delete -e "ssh -i ${HOME}/.ssh/ec2-california.pem" \
       ./ "ec2-user@${REMOTE_HOST}":~/ninefx
 }
 
 remote_run() {
-  ssh -t -i "${HOME}/.ssh/ec2-tokyo.pem" "ec2-user@${REMOTE_HOST}" -- "$@"
+  ssh -t -i "${HOME}/.ssh/ec2-california.pem" "ec2-user@${REMOTE_HOST}" -- "$@"
 }
 
 run() {

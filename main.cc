@@ -850,6 +850,11 @@ struct PriceDifference {
     return *this;
   }
 
+  const PriceDifference& operator-=(const PriceDifference& value) {
+    *this = *this - value;
+    return *this;
+  }
+
   bool operator<(PriceDifference value) const {
     return log_price_ < value.log_price_;
   }
@@ -1061,7 +1066,8 @@ struct Asset {
                         hold_.GetMinute() / 60 / 24) +
            StringPrintf("leverage: %.2f, ",
                         signed_hold_.GetMinute() / hold_.GetMinute()) +
-           StringPrintf("base value: %.6f", position_value_);
+           StringPrintf("base value: %.6f, ", position_value_) +
+           StringPrintf("trade: %.2f", trade_);
   }
 
  private:
@@ -2771,7 +2777,7 @@ class QFeatures {
 
   void Simulate(const AccumulatedRates& rates,
                 int ratio) {
-    int leverage = 0;
+    // int leverage = 0;
     Asset asset;
     Price last_price;
     int last_week_index = 0;
@@ -2800,7 +2806,7 @@ class QFeatures {
       if (!feature.Init(config_, rates, now, ratio) ||
           !volatility.IsValid() ||
           !current_price.IsValid()) {
-        leverage = 0;
+        // leverage = 0;
         asset.Trade(now, last_price, 0, true);
         continue;
       }
@@ -2815,13 +2821,31 @@ class QFeatures {
       }
       sort(distance_and_feature_ids.begin(), distance_and_feature_ids.end());
 
+      PriceDifference score = PriceDifference::InRatio(1);
+      for (int i = 0; i < kQRedundancy; i++) {
+        QFeature& predicted_feature =
+            features_[distance_and_feature_ids[i].second];
+        score += predicted_feature.MutableQFeatureScore(1)
+                                  ->GetScore(volatility);
+        score -= predicted_feature.MutableQFeatureScore(-1)
+                                  ->GetScore(volatility);
+      }
+      double ratio = score.GetLogValue() / kQRedundancy / GetParams().spread;
+      double current_leverage = asset.GetLeverage(current_price);
+      double leverage = current_leverage;
+      if (ratio * current_leverage < 0) { leverage = 0; }
+      if (ratio > 1) { leverage = max(leverage, (ratio - 1) / 2); }
+      if (ratio < -1) { leverage = min(leverage, (ratio + 1) / 2); }
+      leverage = max(-1.0, min(1.0, leverage));
+      asset.Trade(now, current_price, leverage, true);
+      /*
       PriceDifference best_score = PriceDifference::InRatio(0.1);
       int best_leverage = 0;
       for (int leverage_to = -1; leverage_to <= 1; leverage_to++) {
         PriceDifference score =
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage)) *
-             abs(leverage_to) * kQRedundancy * 1.0);
+             abs(leverage_to) * kQRedundancy);
         for (int i = 0; i < kQRedundancy; i++) {
           QFeature& predicted_feature =
               features_[distance_and_feature_ids[i].second];
@@ -2844,6 +2868,7 @@ class QFeatures {
       }
       leverage = next_leverage;
       asset.Trade(now, current_price, next_leverage, true);
+      */
     }
     LOG(INFO) << asset.Stats();
   }
@@ -2862,7 +2887,7 @@ class QFeatures {
             next_reward.GetScore(leverage_to) * kDiscountFactor +
             PriceDifference::InRatio(1 - GetParams().spread) *
             (min(1, abs(leverage_to - leverage_from)) *
-             abs(leverage_to) +
+             abs(leverage_to) * 0 +
              abs(leverage_to - leverage_from) * 30) +
             reward.GetReward(ratio) * leverage_to;
         if (leverage_to == -1 || best_score < score) {
@@ -3466,10 +3491,10 @@ class Simulator {
         test_rates_(test_rates) {}
 
   void LearnQFeatures() {
-    const int kRatio = 4;
-    const FeatureConfig feature_config({1, 8, 32}, 8);
+    const int kRatio = 16;
+    // const FeatureConfig feature_config({1, 8, 32}, 8);
     // const FeatureConfig feature_config({1, 8, 32}, kRatio * 2);
-    // const FeatureConfig feature_config({1, 6, 12}, 6);
+    const FeatureConfig feature_config({1, 6, 12}, 6);
     QFeatures features;
     // features.Init(feature_config, *training_rates_, 5, 3);
     features.Init(feature_config, *training_rates_, kRatio, kRatio / 2);
