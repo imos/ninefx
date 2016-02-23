@@ -16,6 +16,7 @@ DEFINE_int 'base_volatility_interval' 1440 'Interval for base volatility.'
 DEFINE_bool 'future_variation' false 'Variation of future.'
 DEFINE_string 'spread' 0.000029 'Use spread.'
 DEFINE_int 'random_seed' -1 'Random seed.'
+DEFINE_bool 'volatility_adjustment' false 'Enable volatility adjustment.'
 
 DEFINE_list 'training' '2011' 'Years for training.'
 DEFINE_list 'evaluation' '2012' 'Years for evaluation.'
@@ -66,6 +67,9 @@ if (( FLAGS_random_seed < 0 )); then
   export FX_RANDOM_SEED="$(sub::rand)"
 else
   export FX_RANDOM_SEED="${FLAGS_random_seed}"
+fi
+if (( FLAGS_volatility_adjustment )); then
+  export FX_VOLATILITY_ADJUSTMENT=1
 fi
 
 LOG INFO 'Executing...'

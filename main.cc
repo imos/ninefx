@@ -174,6 +174,8 @@ struct Params {
         GetInteger("FX_BASE_VOLATILITY_INTERVAL", 24 * 60);
     params->future_variation = GetBoolean("FX_FUTURE_VARIATION", false);
     params->spread = GetFloat("FX_SPREAD", 0.29 / 10000);
+    params->volatility_adjustment =
+        (GetInteger("FX_VOLATILITY_ADJUSTMENT", 0) != 0);
 
     params->initialized_ = true;
   }
@@ -242,6 +244,7 @@ struct Params {
   int base_volatility_interval;
   bool future_variation;
   float spread;
+  bool volatility_adjustment;
 
  private:
   map<string, string> GetJsonParameters() const {
@@ -250,6 +253,7 @@ struct Params {
         {"mode", Mode().GetName(mode)},
         {"future", Future().GetName(future)},
         {"future_curve", FutureCurve().GetName(future_curve)},
+        {"volatility_adjustment", volatility_adjustment ? "true" : "false"},
     });
   }
 
@@ -476,6 +480,8 @@ struct TimeDifference {
     return time_difference_ / 60.0;
   }
 
+  MULTIPLICATION_OPERATOR(TimeDifference);
+
   TimeDifference operator-(TimeDifference value) const {
     return TimeDifference(time_difference_ - value.time_difference_);
   }
@@ -490,11 +496,11 @@ struct TimeDifference {
     return *this = *this + value;
   }
 
-  TimeDifference operator*(double value) const {
-    TimeDifference result;
-    result.SetRawValue(round(GetRawValue() * value));
-    return result;
-  }
+  // TimeDifference operator*(double value) const {
+  //   TimeDifference result;
+  //   result.SetRawValue(round(GetRawValue() * value));
+  //   return result;
+  // }
 
   bool operator<(TimeDifference value) const {
     return GetRawValue() < value.GetRawValue();
@@ -2390,11 +2396,14 @@ struct PastFeature {
             Volatility volatility,
             int ratio,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
-    if (!volatility.IsValid()) { return false; }
+    CHECK(volatility.IsValid());
 
     TimeDifference last_difference = TimeDifference::InMinute(0);
     for (size_t i = 0; i < config.GetPastSize(); i++) {
       TimeDifference past_differnce = config.GetPast((int)i, ratio);
+      if (GetParams().volatility_adjustment) {
+        past_differnce /= volatility.GetValue() / GetParams().spread;
+      }
       if (!past_[i].Init(rates,
                          now - past_differnce,
                          now - last_difference - TimeDifference::InMinute(1),
