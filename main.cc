@@ -2387,8 +2387,11 @@ struct PastFeature {
   bool Init(const FeatureConfig& config,
             const AccumulatedRates& rates,
             Time now,
+            Volatility volatility,
             int ratio,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
+    if (!volatility.IsValid()) { return false; }
+
     TimeDifference last_difference = TimeDifference::InMinute(0);
     for (size_t i = 0; i < config.GetPastSize(); i++) {
       TimeDifference past_differnce = config.GetPast((int)i, ratio);
@@ -2556,8 +2559,9 @@ struct QFeature {
   bool Init(const FeatureConfig& config,
             const AccumulatedRates& rates,
             Time now,
+            Volatility volatility,
             int ratio) {
-    return past_.Init(config, rates, now, ratio);
+    return past_.Init(config, rates, now, volatility, ratio);
   }
 
   double MeasureDistance(const FeatureConfig& config,
@@ -2615,7 +2619,7 @@ struct QFeatureReward {
     }
 
     QFeature feature;
-    if (!feature.Init(config, rates, now, ratio)) {
+    if (!feature.Init(config, rates, now, volatility_, ratio)) {
       return false;
     }
 
@@ -2722,7 +2726,7 @@ class QFeatures {
       }
       times.insert(time);
       QFeature feature;
-      if (feature.Init(config, rates, time, ratio)) {
+      if (feature.Init(config, rates, time, rates.GetVolatility(time), ratio)) {
         features_.push_back(feature);
       }
     }
@@ -2803,8 +2807,8 @@ class QFeatures {
       // 現在の特徴量を生成する
       QFeature feature;
       Volatility volatility = rates.GetVolatility(now);
-      if (!feature.Init(config_, rates, now, ratio) ||
-          !volatility.IsValid() ||
+      if (!volatility.IsValid() ||
+          !feature.Init(config_, rates, now, volatility, ratio) ||
           !current_price.IsValid()) {
         // leverage = 0;
         asset.Trade(now, last_price, 0, true);
@@ -3017,7 +3021,8 @@ struct Feature {
             Time now,
             int ratio,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
-    past_.Init(config, rates, now, ratio, price_adjustment);
+    past_.Init(
+        config, rates, now, rates.GetVolatility(now), ratio, price_adjustment);
     if (!InitFuture(rates, now, config.GetFuture(ratio), price_adjustment)) {
       return false;
     }
@@ -3492,9 +3497,11 @@ class Simulator {
 
   void LearnQFeatures() {
     const int kRatio = 16;
-    // const FeatureConfig feature_config({1, 8, 32}, 8);
+    // const FeatureConfig feature_config({1, 6, 18}, 6);
+    const FeatureConfig feature_config({1, 8, 32}, 8);
     // const FeatureConfig feature_config({1, 8, 32}, kRatio * 2);
-    const FeatureConfig feature_config({1, 6, 12}, 6);
+    // const FeatureConfig feature_config({1, 6, 12}, 6);
+    // const FeatureConfig feature_config({1, 4, 8}, 4);
     QFeatures features;
     // features.Init(feature_config, *training_rates_, 5, 3);
     features.Init(feature_config, *training_rates_, kRatio, kRatio / 2);
