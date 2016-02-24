@@ -17,6 +17,7 @@ DEFINE_bool 'future_variation' false 'Variation of future.'
 DEFINE_string 'spread' 0.000029 'Use spread.'
 DEFINE_int 'random_seed' -1 'Random seed.'
 DEFINE_bool 'volatility_adjustment' false 'Enable volatility adjustment.'
+DEFINE_int 'volatility_power' 1 'Power of volatility.'
 
 DEFINE_list 'training' '2011' 'Years for training.'
 DEFINE_list 'evaluation' '2012' 'Years for evaluation.'
@@ -71,6 +72,7 @@ fi
 if (( FLAGS_volatility_adjustment )); then
   export FX_VOLATILITY_ADJUSTMENT=1
 fi
+export FX_VOLATILITY_POWER="${FLAGS_volatility_power}"
 
 LOG INFO 'Executing...'
 commands=("./bin/${FLAGS_target}")

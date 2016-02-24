@@ -176,6 +176,7 @@ struct Params {
     params->spread = GetFloat("FX_SPREAD", 0.29 / 10000);
     params->volatility_adjustment =
         (GetInteger("FX_VOLATILITY_ADJUSTMENT", 0) != 0);
+    params->volatility_power = GetInteger("FX_VOLATILITY_POWER", 1);
 
     params->initialized_ = true;
   }
@@ -245,6 +246,7 @@ struct Params {
   bool future_variation;
   float spread;
   bool volatility_adjustment;
+  int volatility_power;
 
  private:
   map<string, string> GetJsonParameters() const {
@@ -254,6 +256,7 @@ struct Params {
         {"future", Future().GetName(future)},
         {"future_curve", FutureCurve().GetName(future_curve)},
         {"volatility_adjustment", volatility_adjustment ? "true" : "false"},
+        {"volatility_power", StringPrintf("%d", volatility_power)},
     });
   }
 
@@ -2396,13 +2399,13 @@ struct PastFeature {
             Volatility volatility,
             int ratio,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
-    CHECK(volatility.IsValid());
+    if (!volatility.IsValid()) { return false; }
 
     TimeDifference last_difference = TimeDifference::InMinute(0);
     for (size_t i = 0; i < config.GetPastSize(); i++) {
       TimeDifference past_differnce = config.GetPast((int)i, ratio);
       if (GetParams().volatility_adjustment) {
-        past_differnce /= volatility.GetValue() / GetParams().spread;
+        past_differnce /= pow(volatility.GetValue() / GetParams().spread, 2.0);
       }
       if (!past_[i].Init(rates,
                          now - past_differnce,
@@ -2475,7 +2478,8 @@ struct QFeatureScore {
   PriceDifference GetScore(Volatility volatility) const {
     PriceDifference result;
     double score =
-        score_ + volatility_score_ * volatility.GetValue();
+        score_ + volatility_score_ * pow(volatility.GetValue(),
+                                         GetParams().volatility_power);
     CHECK(!IsNan(score) && !IsInf(score))
         << "Invalid score: " << score << ", " << DebugString();
     CHECK_GE(score * PriceDifference::kLogPriceRatio,
@@ -2528,7 +2532,7 @@ struct QFeatureScore {
     CHECK_LT(PriceDifference::InRatio(0.66), reward);
     CHECK_LT(reward, PriceDifference::InRatio(1.5));
 
-    double x = volatility.GetValue();
+    double x = pow(volatility.GetValue(), GetParams().volatility_power);
     double y = reward.GetLogValue();
     xy_sum_ += x * y;
     xx_sum_ += x * x;
