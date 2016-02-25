@@ -73,7 +73,7 @@ T CastWithBoundaryCheck(double value) {
   CHECK(!IsNan(value));
   CHECK_GE(value, numeric_limits<T>::min());
   CHECK_LE(value, numeric_limits<T>::max());
-  return static_cast<T>(value);
+  return static_cast<T>(round(value));
 }
 
 string StringPrintf(const char* const format, ...) {
@@ -291,15 +291,12 @@ void Parallel(const function<bool(int)>& f) {
   for (int thread_id = 0; thread_id < GetParams().num_threads; thread_id++) {
     threads.push_back(thread([&f, thread_id]{ while (f(thread_id)); }));
   }
-  for (thread& t : threads) {
-    t.join();
-  }
+  for (thread& t : threads) { t.join(); }
 }
 
 template<class T, class S = T>
 void ParallelFor(
     T begin, T end, S step, S chunk_step, const function<void(T)>& f) {
-  vector<thread> threads;
   T next = begin;
   mutex t_mutex;
   Parallel([&](int) {
@@ -307,9 +304,7 @@ void ParallelFor(
     {
       lock_guard<mutex> t_mutex_guard(t_mutex);
       base = next;
-      if (!(base < end)) {
-        return false;
-      }
+      if (!(base < end)) { return false; }
       next += chunk_step;
     }
 
@@ -317,7 +312,6 @@ void ParallelFor(
          current += step) {
       f(current);
     }
-
     return true;
   });
 }
@@ -422,9 +416,9 @@ struct Sum {
 
   T GetAverage(int count) const {
     CheckCount(count);
-    assert(count > 0);
+    CHECK_GT(count, 0);
     int64_t new_value = (value_ + count / 2) / count;
-    assert(new_value < 0x7fffffff);
+    CHECK_LT(new_value, 0x7fffffff);
     T result;
     result.SetRawValue(new_value);
     return result;
@@ -436,9 +430,7 @@ struct Sum {
 
   // SegmentTree用の加算関数．
   // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
-  static Sum<T> Add(const Sum<T>& a, const Sum<T>& b) {
-    return a + b;
-  }
+  static Sum<T> Add(const Sum<T>& a, const Sum<T>& b) { return a + b; }
 
  private:
 #ifndef NDEBUG
@@ -454,300 +446,441 @@ struct Sum {
 #endif
 
  private:
-  Sum(int64_t value, int32_t count) : value_(value) {
-    SetCount(count);
-  }
+  Sum(int64_t value, int32_t count) : value_(value) { SetCount(count); }
 
   int64_t value_;
 };
 
-struct TimeDifference {
- public:
-  TimeDifference() : time_difference_(0) {}
-  explicit TimeDifference(int64_t time_difference)
-      : time_difference_((int32_t)time_difference) {
-    assert(numeric_limits<int32_t>::min() <= time_difference &&
-           time_difference <= numeric_limits<int32_t>::max());
+template<typename FinalType, typename ValueType = int32_t>
+struct ScalarBase {
+  static constexpr ValueType kInvalid = numeric_limits<ValueType>::max();
+
+  ScalarBase() : value_(0) {}
+  explicit ScalarBase(ValueType value) : value_(value) {}
+
+  ValueType GetRawValue() const {
+    CHECK(IsValid()) << StaticDebugString();
+    return value_;
+  }
+  void SetRawValue(ValueType value) {
+    value_ = value;
+    CHECK(IsValid()) << StaticDebugString();
   }
 
-  int32_t GetRawValue() const { return time_difference_; }
-  void SetRawValue(int64_t value) {
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    time_difference_ = static_cast<int32_t>(value);
+  bool IsValid() const { return value_ != kInvalid; }
+  void Invalidate() { value_ = kInvalid; }
+
+  #define SCALAR_BASE_COMPARISON_OPERATOR(Operator)                            \
+      bool operator Operator(FinalType value) const {                          \
+        return IsValid() && value.IsValid() &&                                 \
+               GetRawValue() Operator value.GetRawValue();                     \
+      }
+  SCALAR_BASE_COMPARISON_OPERATOR(<);
+  SCALAR_BASE_COMPARISON_OPERATOR(<=);
+  SCALAR_BASE_COMPARISON_OPERATOR(>);
+  SCALAR_BASE_COMPARISON_OPERATOR(>=);
+  SCALAR_BASE_COMPARISON_OPERATOR(==);
+  SCALAR_BASE_COMPARISON_OPERATOR(!=);
+
+  static FinalType Invalid()
+      { FinalType result; result.Invalidate(); return result; }
+  static FinalType InRawValue(ValueType value)
+      { FinalType result; result.SetRawValue(value); return result; }
+  static FinalType InRawValue(double value) {
+    return InRawValue(CastWithBoundaryCheck<ValueType>(round(value)));
   }
 
-  int32_t GetSecond() const { return time_difference_; }
-
-  double GetMinute() const {
-    return time_difference_ / 60.0;
+  static string StaticDebugString() {
+    return typeid(FinalType).name();
   }
 
-  MULTIPLICATION_OPERATOR(TimeDifference);
+ protected:
+  const FinalType& FinalValue() const
+      { return static_cast<const FinalType&>(*this); }
 
-  TimeDifference operator-(TimeDifference value) const {
-    return TimeDifference(time_difference_ - value.time_difference_);
+  ValueType value_;
+
+  // virtualなどの関数を作らせないための制限を設定
+  // static_assert(is_trivially_copyable<FinalType>::value,
+  //               "A scalar value must be trivially copyable.");
+};
+
+template<typename FinalType, typename ValueType = int32_t>
+struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
+  typedef double WeightType;
+
+  AdditiveScalarBase() : ScalarBase<FinalType, ValueType>()
+      { SetWeight(0); }
+  explicit AdditiveScalarBase(ValueType value, WeightType weight)
+      : ScalarBase<FinalType, ValueType>(value) { SetWeight(weight); }
+
+  const FinalType& operator+=(FinalType value) {
+    this->value_ += value.value_;
+    SetWeight(GetWeight() + value.GetWeight());
+    return this->FinalValue();
   }
 
-  TimeDifference operator+(const TimeDifference& value) const {
-    TimeDifference result;
-    result.SetRawValue(GetRawValue() + value.GetRawValue());
+  FinalType operator-() const
+      { return FinalType::InRawValue(-this->GetRawValue()); }
+
+  FinalType operator+(FinalType value) const
+      { FinalType result = this->FinalValue(); return result += value; }
+
+  const FinalType& operator-=(FinalType value) {
+    this->value_ -= value.value_;
+    SetWeight(GetWeight() - value.GetWeight());
+    return this->FinalValue();
+  }
+
+  FinalType operator-(FinalType value) const
+      { FinalType result = this->FinalValue(); return result -= value; }
+
+  const FinalType& operator*=(double ratio) {
+    this->value_ *= ratio;
+    SetWeight(GetWeight() * ratio);
+    return this->FinalValue();
+  }
+
+  FinalType operator*(double ratio) const
+      { FinalType result = this->FinalValue(); return result *= ratio; }
+
+  const FinalType& operator/=(double ratio) {
+    return *this *= 1 / ratio;
+  }
+
+  FinalType operator/(double ratio) const
+      { FinalType result = this->FinalValue(); return result /= ratio; }
+
+ protected:
+#ifndef NDEBUG
+  double GetWeight() const { return weight_; }
+  void SetWeight(double weight) { weight_ = weight; }
+  double weight_;
+#else
+  int32_t GetWeight() const { return 0; }
+  void SetWeight(double) {}
+#endif
+};
+
+template<typename RootType, typename ScalarType = int32_t>
+struct DifferenceBase
+    : public AdditiveScalarBase<typename RootType::DifferenceType,
+                                ScalarType> {
+  typedef AdditiveScalarBase<typename RootType::DifferenceType, ScalarType>
+          ParentType;
+
+  DifferenceBase() : ParentType() {}
+};
+
+template<typename RootType, typename ScalarType = int32_t>
+struct ValueBase
+    : public ScalarBase<typename RootType::ValueType, ScalarType> {
+  typedef ScalarBase<typename RootType::ValueType, ScalarType> ParentType;
+  typedef typename RootType::ValueType ValueType;
+  typedef typename RootType::DifferenceType DifferenceType;
+
+  ValueBase() : ParentType() { this->Invalidate(); }
+
+  DifferenceType operator-(ValueType value) const {
+    return DifferenceType::InRawValue(
+        this->GetRawValue() - value.GetRawValue());
+  }
+  const ValueType& operator+=(DifferenceType value) {
+    this->SetRawValue(this->GetRawValue() + value.GetRawValue());
+    return this->FinalValue();
+  }
+  ValueType operator+(DifferenceType value) const
+      { ValueType result = this->FinalValue(); return result += value; }
+  const ValueType& operator-=(DifferenceType value) {
+    this->SetRawValue(this->GetRawValue() - value.GetRawValue());
+    return this->FinalValue();
+  }
+  ValueType operator-(DifferenceType value) const
+      { ValueType result = this->FinalValue(); return result -= value; }
+
+ private:
+  const ValueType& FinalValue() const
+      { return static_cast<const ValueType&>(*this); }
+};
+
+template<typename RootType>
+struct SumBase
+    : public AdditiveScalarBase<typename RootType::SumType, int64_t> {
+  typedef AdditiveScalarBase<typename RootType::SumType, int64_t> ParentType;
+  typedef typename RootType::ValueType ValueType;
+  typedef typename RootType::SumType SumType;
+
+  SumBase() : ParentType() {}
+  SumBase(const SumType& value) : ParentType(value.value_, 1)
+      { CHECK(value.IsValid()); }
+  SumBase(const ValueType& value) : ParentType(value.value_, 1)
+      { CHECK(value.IsValid()); }
+
+  ValueType GetAverage(double weight) const {
+    CHECK(fabs(weight) > 1e-6);
+#ifndef NDEBUG
+    CHECK_NEAR(this->GetWeight(), weight, 1e-6);
+#endif
+    return ValueType::InRawValue(this->value_ / weight);
+  }
+
+  // SegmentTree用の加算関数．
+  // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
+  static SumType Add(const SumType& a, const SumType& b) { return a + b; }
+
+  static SumType From(ValueType value) {
+    SumType result;
+    result.SetRawValue(value.GetRawValue());
+    result.SetWeight(1);
     return result;
   }
-
-  const TimeDifference& operator+=(const TimeDifference& value) {
-    return *this = *this + value;
-  }
-
-  // TimeDifference operator*(double value) const {
-  //   TimeDifference result;
-  //   result.SetRawValue(round(GetRawValue() * value));
-  //   return result;
-  // }
-
-  bool operator<(TimeDifference value) const {
-    return GetRawValue() < value.GetRawValue();
-  }
-
-  COMPARISON_OPERATOR(TimeDifference);
-
-  string DebugString() const {
-    char buf[50];
-    sprintf(buf, "%.1f minute(s)", GetMinute());
-    return buf;
-  }
-
-  static TimeDifference InMinute(double minute) {
-    assert(!IsInf(minute));
-    assert(!IsNan(minute));
-    assert(minute * 60 >= numeric_limits<int32_t>::min());
-    assert(minute * 60 <= numeric_limits<int32_t>::max());
-    return TimeDifference(static_cast<int64_t>(round(minute * 60)));
-  }
-
-  static TimeDifference InMinute(int32_t minute) {
-    return TimeDifference(minute * 60);
-  }
-
- private:
-  int32_t time_difference_;
 };
 
-struct Time {
- public:
-  Time() : time_(0) {}
+struct TimeRoot {
+  typedef int32_t ScalarType;
+  struct DifferenceType : public DifferenceBase<TimeRoot> {
+    DifferenceType() : DifferenceBase<TimeRoot>() {}
 
-  // テスト用
-  static Time InMinute(int32_t minute) {
-    Time t;
-    t.SetMinuteIndex(minute);
-    return t;
-  }
+    int32_t GetSecond() const { return GetRawValue(); }
+    double GetMinute() const { return GetSecond() / 60.0; }
+    string DebugString() const
+        { return StringPrintf("%.1f minute(s)", GetMinute()); }
+    static DifferenceType InMinute(double minute)
+        { return DifferenceType::InRawValue(minute * 60); }
+  };
+  struct ValueType : public ValueBase<TimeRoot> {
+    ValueType() : ValueBase<TimeRoot>() {}
 
-  // 指定された年の1月1日の時刻を返します．
-  static Time InYear(int32_t year) {
-    assert(2000 <= year && year <= 2037);
-    if (year == 2000) { return Time(946652400); }
-    if (year == 2001) { return Time(978274800); }
-    if (year == 2002) { return Time(1009810800); }
-    if (year == 2003) { return Time(1041346800); }
-    if (year == 2004) { return Time(1072882800); }
-    if (year == 2005) { return Time(1104505200); }
-    if (year == 2006) { return Time(1136041200); }
-    if (year == 2007) { return Time(1167577200); }
-    if (year == 2008) { return Time(1199113200); }
-    if (year == 2009) { return Time(1230735600); }
-    if (year == 2010) { return Time(1262271600); }
-    if (year == 2011) { return Time(1293807600); }
-    if (year == 2012) { return Time(1325343600); }
-    if (year == 2013) { return Time(1356966000); }
-    if (year == 2014) { return Time(1388502000); }
-    if (year == 2015) { return Time(1420038000); }
-    if (year == 2016) { return Time(1451574000); }
-    if (year == 2017) { return Time(1483196400); }
-    if (year == 2018) { return Time(1514732400); }
-    if (year == 2019) { return Time(1546268400); }
-    if (year == 2020) { return Time(1577804400); }
-    if (year == 2021) { return Time(1609426800); }
-    if (year == 2022) { return Time(1640962800); }
-    if (year == 2023) { return Time(1672498800); }
-    if (year == 2024) { return Time(1704034800); }
-    if (year == 2025) { return Time(1735657200); }
-    if (year == 2026) { return Time(1767193200); }
-    if (year == 2027) { return Time(1798729200); }
-    if (year == 2028) { return Time(1830265200); }
-    if (year == 2029) { return Time(1861887600); }
-    if (year == 2030) { return Time(1893423600); }
-    if (year == 2031) { return Time(1924959600); }
-    if (year == 2032) { return Time(1956495600); }
-    if (year == 2033) { return Time(1988118000); }
-    if (year == 2034) { return Time(2019654000); }
-    if (year == 2035) { return Time(2051190000); }
-    if (year == 2036) { return Time(2082726000); }
-    if (year == 2037) { return Time(2114348400); }
-    assert(false);
-    return Time();
-  }
-
-  bool IsValid() const {
-    return time_ != 0;
-  }
-
-  bool operator<(Time value) const {
-    assert(IsValid());
-    assert(value.IsValid());
-    return time_ < value.time_;
-  }
-  COMPARISON_OPERATOR(Time);
-
-  TimeDifference operator-(Time base_time) const {
-    return TimeDifference((int64_t)time_ - (int64_t)base_time.time_);
-  }
-
-  Time operator-(TimeDifference time_difference) const {
-    return Time(static_cast<int64_t>(time_) - time_difference.GetSecond());
-  }
-
-  Time operator+(TimeDifference time_difference) const {
-    return Time(static_cast<int64_t>(time_) + time_difference.GetSecond());
-  }
-
-  Time operator+=(TimeDifference time_difference) {
-    return *this = *this + time_difference;
-  }
-
-  void AddMinute(int32_t minute) {
-    SetSecond(GetSecond() + minute * 60);
-  }
-
-  double GetMinute() const {
-    return GetSecond() / 60.0;
-  }
-
-  // 1970年1月1日0時(UTC)から経過した時間を分単位で返します．
-  int32_t GetMinuteIndex() const {
-    return static_cast<int32_t>((GetSecond() + 30) / 60);
-  }
-
-  int32_t GetWeekIndex() const {
-    return (GetMinuteIndex() - 4320) / (60 * 24 * 7);
-  }
-
-  // 直近の日曜日0時(UTC)から経過した時間を分単位で返します．
-  int32_t GetWeeklyIndex() const {
-    return (GetMinuteIndex() - 4320) % (60 * 24 * 7);
-  }
-
-  bool Load(FILE* fp) {
-    int32_t minute;
-    if (fread(&minute, sizeof(minute), 1, fp) <= 0) { return false; }
-    SetMinuteIndex(minute);
-    return true;
-  }
-
-  int GetIndex(Time base_time) const {
-    assert(time_ >= base_time.time_);
-    return (int)((time_ - base_time.time_ + 30) / 60);
-  }
-
-  string DebugString() const {
-    if (time_ == 0) {
-      return "\?\?\?\?-\?\?-\?\? \?\?:\?\?:\?\?";
+    bool Load(FILE* fp) {
+      int32_t minute;
+      if (fread(&minute, sizeof(minute), 1, fp) <= 0) { return false; }
+      SetRawValue(static_cast<int64_t>(minute) * 60);
+      return true;
     }
-    time_t t = time_;
-    struct tm *utc = gmtime(&t);
-    return StringPrintf(
-        "%04d-%02d-%02d %02d:%02d:%02d",
-        utc->tm_year + 1900, utc->tm_mon + 1, utc->tm_mday,
-        utc->tm_hour, utc->tm_min, utc->tm_sec);
-  }
 
-  uint32_t GetRawValue() const { return time_; }
-  void SetRawValue(int64_t value) { SetSecond(value); }
+    int32_t GetSecond() const { return GetRawValue(); }
+    double GetMinute() const { return GetSecond() / 60.0; }
 
-  // 計算に安全な時刻であるかを返す．
-  bool IsSafeTime(bool include_friday) const {
-    int weekly_index = GetWeeklyIndex();
-    // 月曜日の1時(UTC)までは週末の影響を受けやすいので除去．
-    if (weekly_index < 60 * 24 * 1 + 60) { return false; }
-    // 金曜日の18時(UTC)以降は流動性が下がるので除去．
-    if (weekly_index >= 60 * 24 * 5 + 60 * 18) { return false; }
-    // [OPTIONAL] 金曜日の9時(UTC)以降は指標発表の影響を受けるので除去．
-    if (include_friday &&
-        weekly_index >= 60 * 24 * 5 + 60 * 9) { return false; }
-    return true;
-  }
+    // TODO(imos): Deprecate this.
+    void AddMinute(int32_t minute) {
+      *this += DifferenceType::InMinute(minute);
+    }
 
-  bool IsSummerTime() const {
-    int64_t t = time_;
-    if (954658800 < t && t < 972799200) { return true; } // 2000
-    if (986108400 < t && t < 1004248800) { return true; } // 2001
-    if (1018162800 < t && t < 1035698400) { return true; } // 2002
-    if (1049612400 < t && t < 1067148000) { return true; } // 2003
-    if (1081062000 < t && t < 1099202400) { return true; } // 2004
-    if (1112511600 < t && t < 1130652000) { return true; } // 2005
-    if (1143961200 < t && t < 1162101600) { return true; } // 2006
-    if (1173596400 < t && t < 1194156000) { return true; } // 2007
-    if (1205046000 < t && t < 1225605600) { return true; } // 2008
-    if (1236495600 < t && t < 1257055200) { return true; } // 2009
-    if (1268550000 < t && t < 1289109600) { return true; } // 2010
-    if (1299999600 < t && t < 1320559200) { return true; } // 2011
-    if (1331449200 < t && t < 1352008800) { return true; } // 2012
-    if (1362898800 < t && t < 1383458400) { return true; } // 2013
-    if (1394348400 < t && t < 1414908000) { return true; } // 2014
-    if (1425798000 < t && t < 1446357600) { return true; } // 2015
-    if (1457852400 < t && t < 1478412000) { return true; } // 2016
-    if (1489302000 < t && t < 1509861600) { return true; } // 2017
-    if (1520751600 < t && t < 1541311200) { return true; } // 2018
-    if (1552201200 < t && t < 1572760800) { return true; } // 2019
-    if (1583650800 < t && t < 1604210400) { return true; } // 2020
-    if (1615705200 < t && t < 1636264800) { return true; } // 2021
-    if (1647154800 < t && t < 1667714400) { return true; } // 2022
-    if (1678604400 < t && t < 1699164000) { return true; } // 2023
-    if (1710054000 < t && t < 1730613600) { return true; } // 2024
-    if (1741503600 < t && t < 1762063200) { return true; } // 2025
-    if (1772953200 < t && t < 1793512800) { return true; } // 2026
-    if (1805007600 < t && t < 1825567200) { return true; } // 2027
-    if (1836457200 < t && t < 1857016800) { return true; } // 2028
-    if (1867906800 < t && t < 1888466400) { return true; } // 2029
-    if (1899356400 < t && t < 1919916000) { return true; } // 2030
-    if (1930806000 < t && t < 1951365600) { return true; } // 2031
-    if (1962860400 < t && t < 1983420000) { return true; } // 2032
-    if (1994310000 < t && t < 2014869600) { return true; } // 2033
-    if (2025759600 < t && t < 2046319200) { return true; } // 2034
-    if (2057209200 < t && t < 2077768800) { return true; } // 2035
-    if (2088658800 < t && t < 2109218400) { return true; } // 2036
-    if (2120108400 < t && t < 2140668000) { return true; } // 2037
-    return false;
-  }
+    // 1970年1月1日0時(UTC)から経過した時間を分単位で返します．
+    int32_t GetMinuteIndex() const {
+      return static_cast<int32_t>((GetSecond() + 30) / 60);
+    }
 
-  static Time Invalid() {
-    Time time;
-    CHECK(!time.IsValid());
-    return time;
-  }
+    int32_t GetWeekIndex() const {
+      return (GetMinuteIndex() - 4320) / (60 * 24 * 7);
+    }
 
- private:
-  explicit Time(int64_t second) { SetSecond(second); }
+    // 直近の日曜日0時(UTC)から経過した時間を分単位で返します．
+    int32_t GetWeeklyIndex() const {
+      return (GetMinuteIndex() - 4320) % (60 * 24 * 7);
+    }
 
-  int64_t GetSecond() const {
-    return time_;
-  }
+    int GetIndex(ValueType base_time) const {
+      return GetMinuteIndex() - base_time.GetMinuteIndex();
+    }
 
-  void SetSecond(int64_t second) {
-    assert(0 <= second && second <= numeric_limits<uint32_t>::max());
-    time_ = (uint32_t)second;
-  }
+    // 計算に安全な時刻であるかを返す．
+    bool IsSafeTime(bool include_friday) const {
+      int weekly_index = GetWeeklyIndex();
+      // 月曜日の1時(UTC)までは週末の影響を受けやすいので除去．
+      if (weekly_index < 60 * 24 * 1 + 60) { return false; }
+      // 金曜日の18時(UTC)以降は流動性が下がるので除去．
+      if (weekly_index >= 60 * 24 * 5 + 60 * 18) { return false; }
+      // [OPTIONAL] 金曜日の9時(UTC)以降は指標発表の影響を受けるので除去．
+      if (include_friday &&
+          weekly_index >= 60 * 24 * 5 + 60 * 9) { return false; }
+      return true;
+    }
 
-  void SetMinuteIndex(int32_t minute) {
-    SetSecond((int64_t)minute * 60);
-  }
+    bool IsSummerTime() const {
+      CHECK(IsValid());
+      int64_t t = GetRawValue();
+      if (954658800 < t && t < 972799200) { return true; } // 2000
+      if (986108400 < t && t < 1004248800) { return true; } // 2001
+      if (1018162800 < t && t < 1035698400) { return true; } // 2002
+      if (1049612400 < t && t < 1067148000) { return true; } // 2003
+      if (1081062000 < t && t < 1099202400) { return true; } // 2004
+      if (1112511600 < t && t < 1130652000) { return true; } // 2005
+      if (1143961200 < t && t < 1162101600) { return true; } // 2006
+      if (1173596400 < t && t < 1194156000) { return true; } // 2007
+      if (1205046000 < t && t < 1225605600) { return true; } // 2008
+      if (1236495600 < t && t < 1257055200) { return true; } // 2009
+      if (1268550000 < t && t < 1289109600) { return true; } // 2010
+      if (1299999600 < t && t < 1320559200) { return true; } // 2011
+      if (1331449200 < t && t < 1352008800) { return true; } // 2012
+      if (1362898800 < t && t < 1383458400) { return true; } // 2013
+      if (1394348400 < t && t < 1414908000) { return true; } // 2014
+      if (1425798000 < t && t < 1446357600) { return true; } // 2015
+      if (1457852400 < t && t < 1478412000) { return true; } // 2016
+      if (1489302000 < t && t < 1509861600) { return true; } // 2017
+      if (1520751600 < t && t < 1541311200) { return true; } // 2018
+      if (1552201200 < t && t < 1572760800) { return true; } // 2019
+      if (1583650800 < t && t < 1604210400) { return true; } // 2020
+      if (1615705200 < t && t < 1636264800) { return true; } // 2021
+      if (1647154800 < t && t < 1667714400) { return true; } // 2022
+      if (1678604400 < t && t < 1699164000) { return true; } // 2023
+      if (1710054000 < t && t < 1730613600) { return true; } // 2024
+      if (1741503600 < t && t < 1762063200) { return true; } // 2025
+      if (1772953200 < t && t < 1793512800) { return true; } // 2026
+      if (1805007600 < t && t < 1825567200) { return true; } // 2027
+      if (1836457200 < t && t < 1857016800) { return true; } // 2028
+      if (1867906800 < t && t < 1888466400) { return true; } // 2029
+      if (1899356400 < t && t < 1919916000) { return true; } // 2030
+      if (1930806000 < t && t < 1951365600) { return true; } // 2031
+      if (1962860400 < t && t < 1983420000) { return true; } // 2032
+      if (1994310000 < t && t < 2014869600) { return true; } // 2033
+      if (2025759600 < t && t < 2046319200) { return true; } // 2034
+      if (2057209200 < t && t < 2077768800) { return true; } // 2035
+      if (2088658800 < t && t < 2109218400) { return true; } // 2036
+      if (2120108400 < t && t < 2140668000) { return true; } // 2037
+      return false;
+    }
 
-  // NOTE: uint32_tは2100年頃までサポートできます
-  uint32_t time_;
+    string DebugString() const {
+      if (!IsValid()) { return "\?\?\?\?-\?\?-\?\? \?\?:\?\?:\?\?"; }
+      time_t t = static_cast<time_t>(GetRawValue());
+      struct tm *utc = gmtime(&t);
+      return StringPrintf(
+          "%04d-%02d-%02d %02d:%02d:%02d",
+          utc->tm_year + 1900, utc->tm_mon + 1, utc->tm_mday,
+          utc->tm_hour, utc->tm_min, utc->tm_sec);
+    }
+
+    static ValueType InMinute(double minute)
+        { return ValueType::InRawValue(minute * 60); }
+
+    // 指定された年の1月1日の時刻を返します．
+    static ValueType InYear(int32_t year) {
+      if (year == 2000) { return ValueType::InRawValue(946652400); }
+      if (year == 2001) { return ValueType::InRawValue(978274800); }
+      if (year == 2002) { return ValueType::InRawValue(1009810800); }
+      if (year == 2003) { return ValueType::InRawValue(1041346800); }
+      if (year == 2004) { return ValueType::InRawValue(1072882800); }
+      if (year == 2005) { return ValueType::InRawValue(1104505200); }
+      if (year == 2006) { return ValueType::InRawValue(1136041200); }
+      if (year == 2007) { return ValueType::InRawValue(1167577200); }
+      if (year == 2008) { return ValueType::InRawValue(1199113200); }
+      if (year == 2009) { return ValueType::InRawValue(1230735600); }
+      if (year == 2010) { return ValueType::InRawValue(1262271600); }
+      if (year == 2011) { return ValueType::InRawValue(1293807600); }
+      if (year == 2012) { return ValueType::InRawValue(1325343600); }
+      if (year == 2013) { return ValueType::InRawValue(1356966000); }
+      if (year == 2014) { return ValueType::InRawValue(1388502000); }
+      if (year == 2015) { return ValueType::InRawValue(1420038000); }
+      if (year == 2016) { return ValueType::InRawValue(1451574000); }
+      if (year == 2017) { return ValueType::InRawValue(1483196400); }
+      if (year == 2018) { return ValueType::InRawValue(1514732400); }
+      if (year == 2019) { return ValueType::InRawValue(1546268400); }
+      if (year == 2020) { return ValueType::InRawValue(1577804400); }
+      if (year == 2021) { return ValueType::InRawValue(1609426800); }
+      if (year == 2022) { return ValueType::InRawValue(1640962800); }
+      if (year == 2023) { return ValueType::InRawValue(1672498800); }
+      if (year == 2024) { return ValueType::InRawValue(1704034800); }
+      if (year == 2025) { return ValueType::InRawValue(1735657200); }
+      if (year == 2026) { return ValueType::InRawValue(1767193200); }
+      if (year == 2027) { return ValueType::InRawValue(1798729200); }
+      if (year == 2028) { return ValueType::InRawValue(1830265200); }
+      if (year == 2029) { return ValueType::InRawValue(1861887600); }
+      if (year == 2030) { return ValueType::InRawValue(1893423600); }
+      if (year == 2031) { return ValueType::InRawValue(1924959600); }
+      if (year == 2032) { return ValueType::InRawValue(1956495600); }
+      if (year == 2033) { return ValueType::InRawValue(1988118000); }
+      if (year == 2034) { return ValueType::InRawValue(2019654000); }
+      if (year == 2035) { return ValueType::InRawValue(2051190000); }
+      if (year == 2036) { return ValueType::InRawValue(2082726000); }
+      if (year == 2037) { return ValueType::InRawValue(2114348400); }
+      LOG(FATAL) << "Unsupported year: " << year;
+      return ValueType();
+    }
+  };
+  struct SumType : public SumBase<TimeRoot> {
+    SumType() : SumBase<TimeRoot>() {}
+
+    bool IsValid() const { return GetRawValue() != kInvalid; }
+  };
 };
 
-typedef Sum<Time> TimeSum;
+typedef typename TimeRoot::DifferenceType TimeDifference;
+typedef typename TimeRoot::ValueType Time;
+typedef typename TimeRoot::SumType TimeSum;
+
+struct PriceRoot {
+  typedef int32_t ScalarType;
+
+  static constexpr double kLogPriceRatio = 1.0e8;
+
+  struct DifferenceType : public DifferenceBase<PriceRoot> {
+    // TODO(imos): Deprecate this.
+    static constexpr double kLogPriceRatio = PriceRoot::kLogPriceRatio;
+
+    DifferenceType() : DifferenceBase<PriceRoot>() {}
+    double GetLogValue() const { return GetRawValue() / kLogPriceRatio; }
+
+    void SetLogValue(double log_price) {
+      SetRawValue(CastWithBoundaryCheck<int64_t>(log_price * kLogPriceRatio));
+    }
+
+    string DebugString() const {
+      return StringPrintf("%+.4f", GetLogValue());
+    }
+
+    static DifferenceType InRatio(double ratio) {
+      return InRawValue(log(ratio) * kLogPriceRatio);
+    }
+  };
+  struct ValueType : public ValueBase<PriceRoot> {
+    ValueType() : ValueBase<PriceRoot>() {}
+
+    bool Load(FILE* fp) {
+      int32_t price;
+      if (fread(&price, sizeof(price), 1, fp) <= 0) { return false; }
+      SetRawValue(price);
+      return true;
+    }
+
+    // TODO(imos): Fix this.
+    int32_t GetLogPrice() const { return GetRawValue(); }
+
+    void SetLogPrice(double log_price) {
+      assert(log_price >= numeric_limits<int32_t>::min());
+      assert(log_price <= numeric_limits<int32_t>::max());
+      SetRawValue(static_cast<int32_t>(round(log_price)));
+    }
+
+    double GetRealPrice() const {
+      return exp(GetRawValue() / kLogPriceRatio);
+    }
+
+    void SetRealPrice(double real_price) {
+      SetRawValue(CastWithBoundaryCheck<int64_t>(
+          log(real_price) * kLogPriceRatio));
+    }
+
+    string DebugString() const {
+      if (!IsValid()) { return "NaN"; }
+      double real_price = GetRealPrice();
+      int upper_digits = max((int)floor(log10(real_price) + 1), 1);
+      int lower_digits = max(0, 6 - upper_digits);
+      return StringPrintf("%.*f", lower_digits, real_price);
+    }
+
+    static ValueType InRealPrice(double real_price) {
+      ValueType result; result.SetRealPrice(real_price); return result;
+    }
+  };
+  struct SumType : public SumBase<PriceRoot> {
+    SumType() : SumBase<PriceRoot>() {}
+  };
+};
+
+typedef typename PriceRoot::DifferenceType PriceDifference;
+typedef typename PriceRoot::ValueType Price;
+typedef typename PriceRoot::SumType PriceSum;
 
 // [start_time, end_time) の時間を 1 分単位でイテレートします．
 class TimeIterator {
@@ -811,206 +944,6 @@ class TimeIterator {
   DISALLOW_COPY_AND_ASSIGN(TimeIterator);
 };
 
-struct PriceDifference {
- public:
-  static constexpr double kLogPriceRatio = 1.0e8;
-
-  PriceDifference() : log_price_(0) {}
-  PriceDifference(int32_t log_price) : log_price_(log_price) {}
-
-  int32_t GetRawValue() const { return log_price_; }
-  void SetRawValue(int64_t value) {
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    log_price_ = static_cast<int32_t>(value);
-  }
-
-  PriceDifference operator*(int32_t ratio) const {
-    PriceDifference result;
-    result.SetRawValue(GetRawValue() * ratio);
-    return result;
-  }
-
-  MULTIPLICATION_OPERATOR(PriceDifference);
-  // PriceDifference operator*(double ratio) const {
-  //   PriceDifference result;
-  //   result.SetRawValue(static_cast<int64_t>(round(GetRawValue() * ratio)));
-  //   return result;
-  // }
-
-  // PriceDifference operator/(double ratio) const {
-  //   return *this * (1 / ratio);
-  // }
-
-  PriceDifference operator+(PriceDifference value) const {
-    PriceDifference result;
-    result.SetRawValue(GetRawValue() + value.GetRawValue());
-    return result;
-  }
-
-  PriceDifference operator-(PriceDifference value) const {
-    PriceDifference result;
-    result.SetRawValue(GetRawValue() - value.GetRawValue());
-    return result;
-  }
-
-  const PriceDifference& operator+=(const PriceDifference& value) {
-    *this = *this + value;
-    return *this;
-  }
-
-  const PriceDifference& operator-=(const PriceDifference& value) {
-    *this = *this - value;
-    return *this;
-  }
-
-  bool operator<(PriceDifference value) const {
-    return log_price_ < value.log_price_;
-  }
-
-  double GetLogValue() const {
-    return log_price_ / kLogPriceRatio;
-  }
-
-  void SetLogValue(double log_price) {
-    double value = log_price * kLogPriceRatio;
-    CHECK_GE(value, numeric_limits<int32_t>::min());
-    CHECK_LE(value, numeric_limits<int32_t>::max());
-    log_price_ = static_cast<int32_t>(round(value));
-  }
-
-  string DebugString() const {
-    return StringPrintf("%+.4f", GetLogValue());
-  }
-
-  static PriceDifference InRatio(double ratio) {
-    double value = round(log(ratio) * kLogPriceRatio);
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    PriceDifference result;
-    result.SetRawValue(static_cast<int32_t>(value));
-    return result;
-  }
-
- private:
-  int32_t log_price_;
-};
-
-struct Price {
- public:
-  static const int32_t kUninitializedPrice = 0x7fffffff;
-  static constexpr double kLogPriceRatio = PriceDifference::kLogPriceRatio;
-
-  Price() : log_price_(kUninitializedPrice) {}
-  Price(int32_t log_price) : log_price_(log_price) {}
-
-  void Validate() const {
-    DCHECK_NE(log_price_, kUninitializedPrice);
-  }
-
-  bool IsValid() const {
-    return log_price_ != kUninitializedPrice;
-  }
-
-  bool operator<(Price value) const {
-    CHECK(IsValid());
-    CHECK(value.IsValid());
-    return log_price_ < value.log_price_;
-  }
-  COMPARISON_OPERATOR(Price);
-
-  Price operator+(PriceDifference price_difference) const {
-    if (!IsValid()) { return Price::Invalid(); }
-
-    Price result;
-    result.SetRawValue(GetRawValue() + price_difference.GetRawValue());
-    return result;
-  }
-
-  Price operator-(PriceDifference price_difference) const {
-    if (!IsValid()) { return Price::Invalid(); }
-
-    Price result;
-    result.SetRawValue(GetRawValue() - price_difference.GetRawValue());
-    return result;
-  }
-
-  PriceDifference operator-(Price value) const {
-    CHECK(IsValid());
-    CHECK(value.IsValid());
-
-    PriceDifference result;
-    result.SetRawValue(GetRawValue() - value.GetRawValue());
-    return result;
-  }
-
-  bool Load(FILE* fp) {
-    return fread(&log_price_, sizeof(log_price_), 1, fp) > 0;
-  }
-
-  int32_t GetLogPrice() const {
-    return log_price_;
-  }
-
-  void SetLogPrice(double log_price) {
-    assert(log_price >= numeric_limits<int32_t>::min());
-    assert(log_price <= numeric_limits<int32_t>::max());
-    log_price_ = static_cast<int32_t>(round(log_price));
-  }
-
-  double GetRealPrice() const {
-    assert(log_price_ != kUninitializedPrice);
-    return exp(log_price_ / kLogPriceRatio);
-  }
-
-  void SetRealPrice(double real_price) {
-    double value = round(log(real_price) * kLogPriceRatio);
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    log_price_ = static_cast<int32_t>(value);
-  }
-
-  double GetRealPriceOrNan() const {
-    if (log_price_ == kUninitializedPrice) { return NAN; }
-    return GetRealPrice();
-  }
-
-  string DebugString() const {
-    if (log_price_ == kUninitializedPrice) {
-      return "NaN";
-    }
-    double real_price = GetRealPrice();
-    int upper_digits = max((int)floor(log10(real_price) + 1), 1);
-    int lower_digits = max(0, 6 - upper_digits);
-    return StringPrintf("%.*f", lower_digits, real_price);
-  }
-
-  int32_t GetRawValue() const { return log_price_; }
-  void SetRawValue(int64_t value) {
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    log_price_ = static_cast<int32_t>(value);
-  }
-
-  static Price Invalid() {
-    Price result;
-    assert(!result.IsValid());
-    return result;
-  }
-
-  static Price InRealPrice(double real_price) {
-    Price result;
-    result.SetRealPrice(real_price);
-    assert(result.IsValid());
-    return result;
-  }
-
- private:
-  int32_t log_price_;
-};
-
-typedef Sum<Price> PriceSum;
-
 struct Asset {
  public:
   Asset() : currency_(1.0),
@@ -1024,6 +957,10 @@ struct Asset {
             position_foreign_currency_(0.0) {}
 
   void UpdateStats(Time current_time, Price current_price) {
+    CHECK(current_time.IsValid());
+    CHECK(current_price.IsValid());
+    if (!last_time_.IsValid()) { last_time_ = current_time; }
+
     highest_value_ = max(highest_value_, GetValue(current_price));
     drawdown_ = max(drawdown_, highest_value_ - GetValue(current_price));
     double leverage = GetLeverage(current_price);
@@ -1044,6 +981,9 @@ struct Asset {
              Price current_price,
              double leverage,
              bool use_spread = false) {
+    CHECK(current_time.IsValid());
+    CHECK(current_price.IsValid());
+
     double value = GetValue(current_price);
     double last_currency = currency_;
     foreign_currency_ = value * leverage / current_price.GetRealPrice();
@@ -1338,8 +1278,8 @@ struct Rate {
     if (!high_.Load(fp)) { return false; }
     if (!low_.Load(fp)) { return false; }
     if (!close_.Load(fp)) { return false; }
-    average_ = (PriceSum(open_) + PriceSum(high_) +
-                PriceSum(low_) + PriceSum(close_)).GetAverage(4);
+    average_ = (PriceSum::From(open_) + PriceSum::From(high_) +
+                PriceSum::From(low_) + PriceSum::From(close_)).GetAverage(4);
     return true;
   }
 
@@ -1666,10 +1606,10 @@ class AccumulatedRates {
       assert((int)count_.size() <= index);
       count_.resize((size_t)(index + 1), 0);
       count_[(size_t)index] = 1;
-      time_sum.push_back(TimeSum(rate.GetTime()));
+      time_sum.push_back(TimeSum::From(rate.GetTime()));
       high_data.push_back(rate.GetHighPrice());
       low_data.push_back(rate.GetLowPrice());
-      sum_data.push_back(PriceSum(rate.GetAveragePrice()));
+      sum_data.push_back(PriceSum::From(rate.GetAveragePrice()));
       open_.push_back(rate.GetOpenPrice());
       close_.push_back(rate.GetClosePrice());
       volatility_sum.push_back(VolatilitySum(rates.GetVolatility(rate_index)));
@@ -1780,23 +1720,23 @@ class AccumulatedRates {
 
     vector<Rate> raw_rates(3);
     raw_rates[0].SetTime(Time::InMinute(1001));
-    raw_rates[0].SetOpenPrice(Price(100));
-    raw_rates[0].SetHighPrice(Price(120));
-    raw_rates[0].SetLowPrice(Price(90));
-    raw_rates[0].SetClosePrice(Price(110));
-    raw_rates[0].SetAveragePrice(Price(105));
+    raw_rates[0].SetOpenPrice(Price::InRawValue(100));
+    raw_rates[0].SetHighPrice(Price::InRawValue(120));
+    raw_rates[0].SetLowPrice(Price::InRawValue(90));
+    raw_rates[0].SetClosePrice(Price::InRawValue(110));
+    raw_rates[0].SetAveragePrice(Price::InRawValue(105));
     raw_rates[1].SetTime(Time::InMinute(1002));
-    raw_rates[1].SetOpenPrice(Price(105));
-    raw_rates[1].SetHighPrice(Price(125));
-    raw_rates[1].SetLowPrice(Price(95));
-    raw_rates[1].SetClosePrice(Price(115));
-    raw_rates[1].SetAveragePrice(Price(110));
+    raw_rates[1].SetOpenPrice(Price::InRawValue(105));
+    raw_rates[1].SetHighPrice(Price::InRawValue(125));
+    raw_rates[1].SetLowPrice(Price::InRawValue(95));
+    raw_rates[1].SetClosePrice(Price::InRawValue(115));
+    raw_rates[1].SetAveragePrice(Price::InRawValue(110));
     raw_rates[2].SetTime(Time::InMinute(1004));
-    raw_rates[2].SetOpenPrice(Price(110));
-    raw_rates[2].SetHighPrice(Price(130));
-    raw_rates[2].SetLowPrice(Price(100));
-    raw_rates[2].SetClosePrice(Price(120));
-    raw_rates[2].SetAveragePrice(Price(115));
+    raw_rates[2].SetOpenPrice(Price::InRawValue(110));
+    raw_rates[2].SetHighPrice(Price::InRawValue(130));
+    raw_rates[2].SetLowPrice(Price::InRawValue(100));
+    raw_rates[2].SetClosePrice(Price::InRawValue(120));
+    raw_rates[2].SetAveragePrice(Price::InRawValue(115));
 
     AccumulatedRates rates{"test case", Rates(raw_rates)};
     {
@@ -1840,11 +1780,11 @@ class AccumulatedRates {
       assert(rates.Count(Time::InMinute(1001), Time::InMinute(1002)) == 2);
       assert(rate.IsValid());
       assert(fabs(rate.GetTime().GetMinute() - 1001.5) < 1e-3);
-      assert(rate.GetOpenPrice().GetLogPrice() == 100);
-      assert(rate.GetHighPrice().GetLogPrice() == 125); 
-      assert(rate.GetLowPrice().GetLogPrice() == 90); 
-      assert(rate.GetClosePrice().GetLogPrice() == 115); 
-      assert(rate.GetAveragePrice().GetLogPrice() == 108); 
+      CHECK_EQ(rate.GetOpenPrice().GetLogPrice(), 100);
+      CHECK_EQ(rate.GetHighPrice().GetLogPrice(), 125); 
+      CHECK_EQ(rate.GetLowPrice().GetLogPrice(), 90); 
+      CHECK_EQ(rate.GetClosePrice().GetLogPrice(), 115); 
+      CHECK_EQ(rate.GetAveragePrice().GetLogPrice(), 108); 
     }
     {
       Rate rate = rates.GetRate(Time::InMinute(1005), Time::InMinute(1005));
@@ -2094,7 +2034,7 @@ struct AdjustedPrice {
             << "base_price: " << base_price.DebugString() << ", "
             << "volatility: " << volatility.DebugString();
       }
-      return Price(static_cast<int32_t>(log_price));
+      return Price::InRawValue(static_cast<int32_t>(log_price));
     }
     PriceDifference price_difference;
     price_difference.SetLogValue(adjusted_price_ / kAdjustedPriceScale);
@@ -2255,9 +2195,9 @@ struct AdjustedRate {
             Time to,
             Time now,
             PriceDifference price_adjustment = PriceDifference::InRatio(1)) {
-    Price current_price =
-        rates.GetRate(now, now).GetClosePrice() + price_adjustment;
+    Price current_price = rates.GetRate(now, now).GetClosePrice();
     if (!current_price.IsValid()) { return false; }
+    current_price += price_adjustment;
 
     Volatility current_volatility = rates.GetVolatility(now);
     if (!current_volatility.IsValid()) { return false; }
