@@ -28,21 +28,6 @@ using namespace std;
     bool operator >=(const TypeName& value) const { return !(*this < value); } \
     bool operator <=(const TypeName& value) const { return !(*this > value); }
 
-#define MULTIPLICATION_OPERATOR(TypeName) \
-    TypeName operator*=(double ratio) {                                        \
-      CHECK(!IsNan(ratio)); CHECK(!IsInf(ratio));                              \
-      SetRawValue(CastWithBoundaryCheck<int64_t>(GetRawValue() * ratio));      \
-      return *this;                                                            \
-    }                                                                          \
-    TypeName operator*(double ratio) const                                     \
-        { TypeName result = *this; result *= ratio; return result; }           \
-    TypeName operator/=(double ratio) { return *this *= 1 / ratio; }           \
-    TypeName operator/(double ratio) const { return *this * (1 / ratio); }
-
-// 2016年2月21日以前に存在したボラティリティの計算バグを有効にする
-// TODO(imos): バグがスコアに寄与していないことを確認した後に削除する．
-const bool kEnableVolatilityBug = false;
-
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
 const double kHighAndLowDistanceWeight = 0;
@@ -53,27 +38,20 @@ constexpr int kQFeatureSize = 1000;
 constexpr int kQRedundancy = 50;
 
 template<typename T>
-int Sign(T x) {
-  if (x < 0) { return -1; }
-  if (x > 0) { return 1; }
-  return 0;
-}
+int Sign(T x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
+bool IsNan(double value) { return ::std::isnan(value); }
+bool IsInf(double value) { return ::std::isinf(value); }
 
-bool IsNan(double value) {
-  return !(value >= 0.0) && !(value <= 0.0);
-}
-
-bool IsInf(double value) {
-  return ::std::isinf(value);
-}
-
-template<typename T>
-T CastWithBoundaryCheck(double value) {
+template<typename T, typename InputType>
+T CastWithBoundaryCheck(InputType value) {
   CHECK(!IsInf(value));
   CHECK(!IsNan(value));
-  CHECK_GE(value, numeric_limits<T>::min());
-  CHECK_LE(value, numeric_limits<T>::max());
-  return static_cast<T>(round(value));
+  CHECK_GE(value, static_cast<double>(numeric_limits<T>::min()));
+  CHECK_LE(value, static_cast<double>(numeric_limits<T>::max()));
+  if (is_floating_point<InputType>::value) {
+    return static_cast<T>(round(value));
+  }
+  return static_cast<T>(value);
 }
 
 string StringPrintf(const char* const format, ...) {
@@ -458,14 +436,11 @@ struct ScalarBase {
   ScalarBase() : value_(0) {}
   explicit ScalarBase(ValueType value) : value_(value) {}
 
-  ValueType GetRawValue() const {
-    CHECK(IsValid()) << StaticDebugString();
-    return value_;
-  }
-  void SetRawValue(ValueType value) {
-    value_ = value;
-    CHECK(IsValid()) << StaticDebugString();
-  }
+  int64_t GetRawValue() const
+      { CHECK(IsValid()) << StaticDebugString(); return value_; }
+  template<class InputType>
+  void SetRawValue(InputType value)
+      { value_ = CastWithBoundaryCheck<ValueType>(value); }
 
   bool IsValid() const { return value_ != kInvalid; }
   void Invalidate() { value_ = kInvalid; }
@@ -484,15 +459,12 @@ struct ScalarBase {
 
   static FinalType Invalid()
       { FinalType result; result.Invalidate(); return result; }
-  static FinalType InRawValue(ValueType value)
-      { FinalType result; result.SetRawValue(value); return result; }
-  static FinalType InRawValue(double value) {
-    return InRawValue(CastWithBoundaryCheck<ValueType>(round(value)));
-  }
 
-  static string StaticDebugString() {
-    return typeid(FinalType).name();
-  }
+  template<class InputType>
+  static FinalType InRawValue(InputType value)
+      { FinalType result; result.SetRawValue(value); return result; }
+
+  static string StaticDebugString() { return typeid(FinalType).name(); }
 
  protected:
   const FinalType& FinalValue() const
@@ -514,24 +486,16 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
   explicit AdditiveScalarBase(ValueType value, WeightType weight)
       : ScalarBase<FinalType, ValueType>(value) { SetWeight(weight); }
 
+  FinalType operator-() const
+      { return FinalType::InRawValue(-this->GetRawValue()); }
   const FinalType& operator+=(FinalType value) {
     this->value_ += value.value_;
     SetWeight(GetWeight() + value.GetWeight());
     return this->FinalValue();
   }
-
-  FinalType operator-() const
-      { return FinalType::InRawValue(-this->GetRawValue()); }
-
   FinalType operator+(FinalType value) const
       { FinalType result = this->FinalValue(); return result += value; }
-
-  const FinalType& operator-=(FinalType value) {
-    this->value_ -= value.value_;
-    SetWeight(GetWeight() - value.GetWeight());
-    return this->FinalValue();
-  }
-
+  const FinalType& operator-=(FinalType value) { return *this += -value; }
   FinalType operator-(FinalType value) const
       { FinalType result = this->FinalValue(); return result -= value; }
 
@@ -540,14 +504,9 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
     SetWeight(GetWeight() * ratio);
     return this->FinalValue();
   }
-
   FinalType operator*(double ratio) const
       { FinalType result = this->FinalValue(); return result *= ratio; }
-
-  const FinalType& operator/=(double ratio) {
-    return *this *= 1 / ratio;
-  }
-
+  const FinalType& operator/=(double ratio) { return *this *= 1 / ratio; }
   FinalType operator/(double ratio) const
       { FinalType result = this->FinalValue(); return result /= ratio; }
 
@@ -589,12 +548,9 @@ struct ValueBase
     this->SetRawValue(this->GetRawValue() + value.GetRawValue());
     return this->FinalValue();
   }
+  const ValueType& operator-=(DifferenceType value) { return *this += -value; }
   ValueType operator+(DifferenceType value) const
       { ValueType result = this->FinalValue(); return result += value; }
-  const ValueType& operator-=(DifferenceType value) {
-    this->SetRawValue(this->GetRawValue() - value.GetRawValue());
-    return this->FinalValue();
-  }
   ValueType operator-(DifferenceType value) const
       { ValueType result = this->FinalValue(); return result -= value; }
 
@@ -1875,17 +1831,6 @@ struct AdjustedPrice {
             Price base_price,
             Volatility volatility,
             double ratio = 1.0) {
-    if (kEnableVolatilityBug) {
-      double value = round((price.GetLogPrice() - base_price.GetLogPrice())
-                           * ratio
-                           / sqrt(fabs(interval.GetMinute()))
-                           / volatility.GetValueDeprecated()
-                           * kBaseAdjustedPrice);
-      assert(numeric_limits<int32_t>::min() <= value &&
-             value <= numeric_limits<int32_t>::max());
-      adjusted_price_ = (int32_t)value;
-      return;
-    }
     PriceDifference price_difference = price - base_price;
     price_difference *= ratio;
     price_difference /= sqrt(fabs(interval.GetMinute()));
@@ -2019,23 +1964,6 @@ struct AdjustedPrice {
   Price GetPrice(TimeDifference interval,
                  Price base_price,
                  Volatility volatility) const {
-    if (kEnableVolatilityBug) {
-      double price_difference =
-          (double)adjusted_price_ / kBaseAdjustedPrice
-                                  * volatility.GetValueDeprecated()
-                                  * sqrt(fabs(interval.GetMinute()));
-      double log_price = round(base_price.GetLogPrice() + price_difference);
-      if (IsNan(log_price) || IsInf(log_price) ||
-          log_price < numeric_limits<int32_t>::min() ||
-          log_price > numeric_limits<int32_t>::max()) {
-        LOG(FATAL)
-            << "Invalid price: " << log_price << ", "
-            << "time_difference: " << interval.DebugString() << ", "
-            << "base_price: " << base_price.DebugString() << ", "
-            << "volatility: " << volatility.DebugString();
-      }
-      return Price::InRawValue(static_cast<int32_t>(log_price));
-    }
     PriceDifference price_difference;
     price_difference.SetLogValue(adjusted_price_ / kAdjustedPriceScale);
     price_difference *= sqrt(fabs(interval.GetMinute()));
@@ -2121,16 +2049,13 @@ struct AdjustedPrice {
               Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
           100.02,
           1e-4);
-      // TODO(imos): このテストが通るように修正を行う
-      if (!kEnableVolatilityBug) {
-        CHECK_NEAR(
-            price.GetPrice(
-                TimeDifference::InMinute(1.0),
-                Price::InRealPrice(100),
-                Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
-            100.02,
-            1e-4);
-      }
+      CHECK_NEAR(
+          price.GetPrice(
+              TimeDifference::InMinute(1.0),
+              Price::InRealPrice(100),
+              Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
+          100.02,
+          1e-4);
     }
   }
 
