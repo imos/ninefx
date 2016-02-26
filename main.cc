@@ -470,6 +470,7 @@ struct ScalarBase {
   const FinalType& FinalValue() const
       { return static_cast<const FinalType&>(*this); }
 
+ private:
   ValueType value_;
 
   // virtualなどの関数を作らせないための制限を設定
@@ -482,26 +483,30 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
   typedef double WeightType;
 
   AdditiveScalarBase() : ScalarBase<FinalType, ValueType>()
-      { SetWeight(0); }
+      { static_cast<FinalType*>(this)->SetWeight(0); }
   explicit AdditiveScalarBase(ValueType value, WeightType weight)
-      : ScalarBase<FinalType, ValueType>(value) { SetWeight(weight); }
+      : ScalarBase<FinalType, ValueType>(value)
+      { static_cast<FinalType*>(this)->SetWeight(weight); }
 
-  FinalType operator-() const
-      { return FinalType::InRawValue(-this->GetRawValue()); }
-  const FinalType& operator+=(FinalType value) {
-    this->value_ += value.value_;
-    SetWeight(GetWeight() + value.GetWeight());
+  const FinalType& operator-=(FinalType value) {
+    this->SetRawValue(this->GetRawValue() - value.GetRawValue());
+    static_cast<FinalType*>(this)->SetWeight(
+        static_cast<FinalType*>(this)->GetWeight() - value.GetWeight());
     return this->FinalValue();
   }
-  FinalType operator+(FinalType value) const
-      { FinalType result = this->FinalValue(); return result += value; }
-  const FinalType& operator-=(FinalType value) { return *this += -value; }
+  FinalType operator-() const
+      { FinalType result; return result -= this->FinalValue(); }
   FinalType operator-(FinalType value) const
       { FinalType result = this->FinalValue(); return result -= value; }
+  FinalType operator+=(FinalType value)
+      { return static_cast<FinalType&>(*this) -= -value; }
+  FinalType operator+(FinalType value) const
+      { return static_cast<const FinalType&>(*this) - -value; }
 
   const FinalType& operator*=(double ratio) {
-    this->value_ *= ratio;
-    SetWeight(GetWeight() * ratio);
+    this->SetRawValue(this->GetRawValue() * ratio);
+    static_cast<FinalType*>(this)->SetWeight(
+        static_cast<FinalType*>(this)->GetWeight() * ratio);
     return this->FinalValue();
   }
   FinalType operator*(double ratio) const
@@ -511,21 +516,36 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
       { FinalType result = this->FinalValue(); return result /= ratio; }
 
  protected:
-#ifndef NDEBUG
-  double GetWeight() const { return weight_; }
-  void SetWeight(double weight) { weight_ = weight; }
-  double weight_;
-#else
   int32_t GetWeight() const { return 0; }
   void SetWeight(double) {}
-#endif
 };
+
+template<typename FinalType, typename ValueType = int32_t>
+struct AdditiveScalarWithWeightBase
+    : public AdditiveScalarBase<FinalType, ValueType> {
+  AdditiveScalarWithWeightBase() : AdditiveScalarBase<FinalType, ValueType>() {}
+  explicit AdditiveScalarWithWeightBase(ValueType value, double weight)
+      : AdditiveScalarBase<FinalType, ValueType>(value, weight) {}
+
+  double GetWeight() const { return weight_; }
+  void SetWeight(double weight) { weight_ = weight; }
+
+ private:
+  double weight_;
+};
+
+#ifndef NDEBUG
+#define AdditiveScalarWithoutWeightBase AdditiveScalarWithWeightBase
+#else
+#define AdditiveScalarWithoutWeightBase AdditiveScalarBase
+#endif
 
 template<typename RootType, typename ScalarType = int32_t>
 struct DifferenceBase
-    : public AdditiveScalarBase<typename RootType::DifferenceType,
-                                ScalarType> {
-  typedef AdditiveScalarBase<typename RootType::DifferenceType, ScalarType>
+    : public AdditiveScalarWithoutWeightBase<
+          typename RootType::DifferenceType, ScalarType> {
+  typedef AdditiveScalarWithoutWeightBase<
+              typename RootType::DifferenceType, ScalarType>
           ParentType;
 
   DifferenceBase() : ParentType() {}
@@ -561,8 +581,10 @@ struct ValueBase
 
 template<typename RootType>
 struct SumBase
-    : public AdditiveScalarBase<typename RootType::SumType, int64_t> {
-  typedef AdditiveScalarBase<typename RootType::SumType, int64_t> ParentType;
+    : public AdditiveScalarWithoutWeightBase<
+          typename RootType::SumType, int64_t> {
+  typedef AdditiveScalarWithoutWeightBase<typename RootType::SumType, int64_t>
+          ParentType;
   typedef typename RootType::ValueType ValueType;
   typedef typename RootType::SumType SumType;
 
@@ -577,7 +599,7 @@ struct SumBase
 #ifndef NDEBUG
     CHECK_NEAR(this->GetWeight(), weight, 1e-6);
 #endif
-    return ValueType::InRawValue(this->value_ / weight);
+    return ValueType::InRawValue(this->GetRawValue() / weight);
   }
 
   // SegmentTree用の加算関数．
