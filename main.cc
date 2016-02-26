@@ -789,6 +789,7 @@ struct PriceRoot {
       return InRawValue(log(ratio) * kLogPriceRatio);
     }
   };
+
   struct ValueType : public ValueBase<PriceRoot> {
     ValueType() : ValueBase<PriceRoot>() {}
 
@@ -801,21 +802,10 @@ struct PriceRoot {
 
     // TODO(imos): Fix this.
     int32_t GetLogPrice() const { return GetRawValue(); }
-
-    void SetLogPrice(double log_price) {
-      assert(log_price >= numeric_limits<int32_t>::min());
-      assert(log_price <= numeric_limits<int32_t>::max());
-      SetRawValue(static_cast<int32_t>(round(log_price)));
-    }
-
-    double GetRealPrice() const {
-      return exp(GetRawValue() / kLogPriceRatio);
-    }
-
-    void SetRealPrice(double real_price) {
-      SetRawValue(CastWithBoundaryCheck<int64_t>(
-          log(real_price) * kLogPriceRatio));
-    }
+    void SetLogPrice(double log_price) { SetRawValue(log_price); }
+    double GetRealPrice() const { return exp(GetRawValue() / kLogPriceRatio); }
+    void SetRealPrice(double real_price)
+        { SetRawValue(log(real_price) * kLogPriceRatio); }
 
     string DebugString() const {
       if (!IsValid()) { return "NaN"; }
@@ -829,6 +819,7 @@ struct PriceRoot {
       ValueType result; result.SetRealPrice(real_price); return result;
     }
   };
+
   struct SumType : public SumBase<PriceRoot> {
     SumType() : SumBase<PriceRoot>() {}
   };
