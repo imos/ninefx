@@ -595,6 +595,8 @@ struct SumBase
       { CHECK(value.IsValid()); }
 
   ValueType GetAverage(double weight) const {
+    CHECK(!IsNan(weight));
+    CHECK(!IsInf(weight));
     CHECK(fabs(weight) > 1e-6);
 #ifndef NDEBUG
     CHECK_NEAR(this->GetWeight(), weight, 1e-6);
