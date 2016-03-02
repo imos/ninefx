@@ -23,11 +23,6 @@ using namespace std;
     TypeName(const TypeName&); \
     void operator=(const TypeName&)
 
-#define COMPARISON_OPERATOR(TypeName) \
-    bool operator >(const TypeName& value) const { return value < *this; } \
-    bool operator >=(const TypeName& value) const { return !(*this < value); } \
-    bool operator <=(const TypeName& value) const { return !(*this > value); }
-
 struct TException { string message; };
 #define TCHECK(condition) for (;!(condition); throw TException()) \
     LOG(ERROR) << "Check failed: " #condition " "
@@ -43,6 +38,30 @@ struct TException { string message; };
 #define TCHECK_GT(val1, val2) TCHECK_OP(val1, val2, >)
 #define TCATCH(...) catch (TException&) \
     { LOG(ERROR) << "Catch failure: " << __VA_ARGS__; throw TException(); }
+
+vector<pair<string, function<void()>>>* test_functions = nullptr;
+int RegisterTestFunction(const string& name, function<void()> f) {
+  if (test_functions == nullptr) {
+    test_functions = new vector<pair<string, function<void()>>>();
+  }
+  test_functions->emplace_back(name, f);
+  return test_functions->size();
+}
+void RunAllTests() {
+  if (test_functions == nullptr) {
+    LOG(ERROR) << "No tests to run.";
+    return;
+  }
+  for (pair<string, function<void()>>& test_case : *test_functions) {
+    LOG(INFO) << "Testing " << test_case.first << " ...";
+    test_case.second();
+  }
+}
+#define TEST(case_name) \
+    void UnitTestFunction_ ## case_name (); \
+    int unit_test_function_registry_ ## case_name = \
+        RegisterTestFunction(#case_name, UnitTestFunction_ ## case_name); \
+    void UnitTestFunction_ ## case_name ()
 
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
@@ -78,10 +97,32 @@ string StringPrintf(const char* const format, ...) {
   return result;
 }
 
+TEST(StringPrintf) {
+  CHECK_EQ("3.14", StringPrintf("%.2f", 3.1415));
+}
+
 vector<string> Split(const string& str, char delimiter) {
   istringstream iss(str); string tmp; vector<string> res;
   while (getline(iss, tmp, delimiter)) res.push_back(tmp);
   return res;
+}
+
+TEST(Split) {
+  CHECK_EQ(0, Split("", 'x').size());
+
+  {
+    auto words = Split("foo", 'x');
+    CHECK_EQ(1, words.size());
+    CHECK_EQ("foo", words[0]);
+  }
+
+  {
+    auto words = Split("abcxdefxghi", 'x');
+    CHECK_EQ(3, words.size());
+    CHECK_EQ("abc", words[0]);
+    CHECK_EQ("def", words[1]);
+    CHECK_EQ("ghi", words[2]);
+  }
 }
 
 template<class T, class X = decltype(T().DebugString())>
@@ -841,6 +882,40 @@ struct PriceRoot {
 typedef typename PriceRoot::DifferenceType PriceDifference;
 typedef typename PriceRoot::ValueType Price;
 typedef typename PriceRoot::SumType PriceSum;
+
+TEST(Price) {
+  PriceDifference d;
+  CHECK(d.IsValid());
+  CHECK_EQ(d.GetLogValue(), 0);
+  d.SetLogValue(0.01);
+  CHECK_NEAR(d.GetLogValue(), 0.01, 1e-6);
+
+  CHECK_NEAR(PriceDifference::InRatio(1.001).GetLogValue(), 0.001, 1e-6);
+  CHECK_NEAR(PriceDifference::InRatio(0.999).GetLogValue(), -0.001, 1e-6);
+  CHECK_NEAR((PriceDifference::InRatio(1.001) +
+              PriceDifference::InRatio(1.002)).GetLogValue(),
+             0.003, 1e-5);
+  CHECK_NEAR((PriceDifference::InRatio(1.001) -
+              PriceDifference::InRatio(1.002)).GetLogValue(),
+             -0.001, 1e-5);
+
+  Price p;
+  CHECK(!p.IsValid());
+  p.SetRealPrice(123.45);
+  CHECK_NEAR(p.GetRealPrice(), 123.45, 1e-6);
+  p += PriceDifference::InRatio(1.5);
+  CHECK_NEAR(p.GetRealPrice(), 123.45 * 1.5, 1e-4);
+  p -= PriceDifference::InRatio(1.5);
+  CHECK_NEAR(p.GetRealPrice(), 123.45, 1e-6);
+
+  CHECK_NEAR(Price::InRealPrice(100.01).GetRealPrice(), 100.01, 1e-6);
+  CHECK_NEAR((Price::InRealPrice(100.02) -
+              Price::InRealPrice(100.01)).GetLogValue(),
+             log(100.02 / 100.01), 1e-8);
+  CHECK_NEAR((Price::InRealPrice(100.01) -
+              Price::InRealPrice(100.02)).GetLogValue(),
+             -log(100.02 / 100.01), 1e-8);
+}
 
 // [start_time, end_time) の時間を 1 分単位でイテレートします．
 class TimeIterator {
@@ -2007,9 +2082,7 @@ typedef typename AdjustedPriceRoot::DifferenceType AdjustedPriceDifference;
 typedef typename AdjustedPriceRoot::ValueType AdjustedPrice;
 typedef typename AdjustedPriceRoot::SumType AdjustedPriceSum;
 
-void AdjustedPriceTest() {
-  fprintf(stderr, "Testing AdjustedPrice...\n");
-
+TEST(AdjustedPrice) {
   // 価格解像度を確認（）
   {
     AdjustedPrice price;
@@ -3752,7 +3825,7 @@ void Test() {
   SegmentTree<int32_t, const int32_t&, max<int32_t>>::Test();
   AccumulatedRates::Test();
   Volatility::Test();
-  AdjustedPriceTest();
+  RunAllTests();
 }
 
 int main(int argc, char** argv) {
