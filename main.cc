@@ -600,15 +600,10 @@ struct SumBase
           typename RootType::SumType, int64_t> {
   typedef AdditiveScalarWithoutWeightBase<typename RootType::SumType, int64_t>
           ParentType;
-  typedef typename RootType::DifferenceType DifferenceType;
   typedef typename RootType::ValueType ValueType;
   typedef typename RootType::SumType SumType;
 
   SumBase() : ParentType() {}
-  SumBase(const SumType& value) : ParentType(value.value_, 1)
-      { CHECK(value.IsValid()); }
-  SumBase(const ValueType& value) : ParentType(value.value_, 1)
-      { CHECK(value.IsValid()); }
 
   ValueType GetAverage(double weight) const {
     CHECK(!IsNan(weight));
@@ -826,15 +821,13 @@ struct PriceRoot {
 
   struct DifferenceType : public DifferenceBase<PriceRoot> {
     DifferenceType() : DifferenceBase<PriceRoot>() {}
+
+    // 価格比の自然対数で設定・取得を行います．
     double GetLogValue() const { return GetRawValue() / kLogPriceRatio; }
+    void SetLogValue(double log_price)
+        { SetRawValue(log_price * kLogPriceRatio); }
 
-    void SetLogValue(double log_price) {
-      SetRawValue(CastWithBoundaryCheck<int64_t>(log_price * kLogPriceRatio));
-    }
-
-    string DebugString() const {
-      return StringPrintf("%+.4f", GetLogValue());
-    }
+    string DebugString() const { return StringPrintf("%+.4f", GetLogValue()); }
 
     static DifferenceType InRatio(double ratio) {
       return InRawValue(log(ratio) * kLogPriceRatio);
