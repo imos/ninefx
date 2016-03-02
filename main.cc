@@ -595,15 +595,13 @@ struct ValueBase
 };
 
 template<typename RootType>
-struct SumBase
-    : public AdditiveScalarWithoutWeightBase<
-          typename RootType::SumType, int64_t> {
-  typedef AdditiveScalarWithoutWeightBase<typename RootType::SumType, int64_t>
-          ParentType;
+struct SumBase : public AdditiveScalarWithoutWeightBase<
+                            typename RootType::SumType, int64_t> {
   typedef typename RootType::ValueType ValueType;
   typedef typename RootType::SumType SumType;
 
-  SumBase() : ParentType() {}
+  SumBase() : AdditiveScalarWithoutWeightBase<
+                  typename RootType::SumType, int64_t>() {}
 
   ValueType GetAverage(double weight) const {
     CHECK(!IsNan(weight));
@@ -615,19 +613,12 @@ struct SumBase
     return ValueType::InRawValue(this->GetRawValue() / weight);
   }
 
-  // const SumType& operator+=(ValueType value) { return *this += From(value); }
-  // SumType operator+(ValueType value) const { return *this + From(value); }
-
   // SegmentTree用の加算関数．
   // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
   static SumType Add(const SumType& a, const SumType& b) { return a + b; }
 
-  static SumType From(ValueType value) {
-    SumType result;
-    result.SetRawValue(value.GetRawValue());
-    result.SetWeight(1);
-    return result;
-  }
+  static SumType From(ValueType value)
+      { return InRawValue(value.GetRawValue(), 1); }
 
   template<class InputType>
   static SumType InRawValue(InputType value, double weight) {

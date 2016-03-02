@@ -32,7 +32,7 @@ cd "$(dirname "${BASH_SOURCE}")"
 
 CXXFLAGS=(-g3 -std=c++0x -lpthread -lglog)
 if (( FLAGS_release )); then
-  CXXFLAGS+=(-O2 -DNDEBUG)
+  CXXFLAGS+=(-O3 -DNDEBUG)
 else
   CXXFLAGS+=(
       -O0
@@ -42,7 +42,7 @@ else
 fi
 
 LOG INFO 'Compiling...'
-"${CXX:-g++}" "${CXXFLAGS[@]}" -o "./bin/${FLAGS_target}" "./${FLAGS_target}.cc"
+time "${CXX:-g++}" "${CXXFLAGS[@]}" -o "./bin/${FLAGS_target}" "./${FLAGS_target}.cc"
 
 export FX_NUM_THREADS="${FLAGS_num_threads}"
 if (( FLAGS_evaluate )); then
@@ -96,5 +96,5 @@ fi
 env | grep '^FX_' >&2
 echo "${commands[@]}" >&2
 if (( ! FLAGS_dry_run )); then
-  "${commands[@]}"
+  time "${commands[@]}"
 fi
