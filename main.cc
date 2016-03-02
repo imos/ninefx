@@ -825,9 +825,6 @@ struct PriceRoot {
   static constexpr double kLogPriceRatio = 1.0e8;
 
   struct DifferenceType : public DifferenceBase<PriceRoot> {
-    // TODO(imos): Deprecate this.
-    static constexpr double kLogPriceRatio = PriceRoot::kLogPriceRatio;
-
     DifferenceType() : DifferenceBase<PriceRoot>() {}
     double GetLogValue() const { return GetRawValue() / kLogPriceRatio; }
 
@@ -857,6 +854,7 @@ struct PriceRoot {
     // TODO(imos): Fix this.
     int32_t GetLogPrice() const { return GetRawValue(); }
     void SetLogPrice(double log_price) { SetRawValue(log_price); }
+
     double GetRealPrice() const { return exp(GetRawValue() / kLogPriceRatio); }
     void SetRealPrice(double real_price)
         { SetRawValue(log(real_price) * kLogPriceRatio); }
@@ -2417,15 +2415,13 @@ struct QFeatureScore {
     double score =
         score_ + volatility_score_ * pow(volatility.GetValue(),
                                          GetParams().volatility_power);
-    CHECK(!IsNan(score) && !IsInf(score))
-        << "Invalid score: " << score << ", " << DebugString();
-    CHECK_GE(score * PriceDifference::kLogPriceRatio,
-             numeric_limits<int32_t>::min())
-        << "Invalid score: " << score << ", " << DebugString();
-    CHECK_LE(score * PriceDifference::kLogPriceRatio,
-             numeric_limits<int32_t>::max())
-        << "Invalid score: " << score << ", " << DebugString();
-    result.SetLogValue(score);
+    try {
+      result.SetLogValue(score);
+    } catch (TException) {
+      LOG(ERROR) << "score: " << score << ", "
+                 << "volatility: " << volatility;
+      throw TException();
+    }
     return result;
   }
 
@@ -2448,9 +2444,6 @@ struct QFeatureScore {
         << "Invalid volatility_score: " << volatility_score
         << ", " << DebugString();
     CHECK(!IsNan(score) && !IsInf(score))
-        << "Invalid score: " << score << ", " << DebugString();
-    CHECK_LE(score * PriceDifference::kLogPriceRatio,
-             numeric_limits<int32_t>::max())
         << "Invalid score: " << score << ", " << DebugString();
 
     score_ = score_ * (1 - learning_rate) + score * learning_rate;
