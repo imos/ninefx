@@ -28,6 +28,22 @@ using namespace std;
     bool operator >=(const TypeName& value) const { return !(*this < value); } \
     bool operator <=(const TypeName& value) const { return !(*this > value); }
 
+struct TException { string message; };
+#define TCHECK(condition) for (;!(condition); throw TException()) \
+    LOG(ERROR) << "Check failed: " #condition " "
+#define TCHECK_OP(val1, val2, op) \
+    for (;!((val1) op (val2)); throw TException()) \
+    LOG(ERROR) << "Check failed: " #val1 " " #op " " #val2 " (" \
+               << val1 << " vs " << val2 << ") "
+#define TCHECK_EQ(val1, val2) TCHECK_OP(val1, val2, ==)
+#define TCHECK_NE(val1, val2) TCHECK_OP(val1, val2, !=)
+#define TCHECK_LE(val1, val2) TCHECK_OP(val1, val2, <=)
+#define TCHECK_LT(val1, val2) TCHECK_OP(val1, val2, <)
+#define TCHECK_GE(val1, val2) TCHECK_OP(val1, val2, >=)
+#define TCHECK_GT(val1, val2) TCHECK_OP(val1, val2, >)
+#define TCATCH(...) catch (TException&) \
+    { LOG(ERROR) << "Catch failure: " << __VA_ARGS__; throw TException(); }
+
 // 距離を計測するときに高値・安値を計算に入れるかどうか．0から1の間の値をとり，0の時は高値・
 // 安値を計算に入れず，1の時は平均を値に入れません．（1が最良）
 const double kHighAndLowDistanceWeight = 0;
@@ -41,18 +57,6 @@ template<typename T>
 int Sign(T x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
 bool IsNan(double value) { return ::std::isnan(value); }
 bool IsInf(double value) { return ::std::isinf(value); }
-
-template<typename T, typename InputType>
-T CastWithBoundaryCheck(InputType value) {
-  CHECK(!IsInf(value));
-  CHECK(!IsNan(value));
-  CHECK_GE(value, static_cast<double>(numeric_limits<T>::min()));
-  CHECK_LE(value, static_cast<double>(numeric_limits<T>::max()));
-  if (is_floating_point<InputType>::value) {
-    return static_cast<T>(round(value));
-  }
-  return static_cast<T>(value);
-}
 
 string StringPrintf(const char* const format, ...) {
   va_list ap;
@@ -84,6 +88,18 @@ template<class T, class X = decltype(T().DebugString())>
 ostream& operator<<(ostream& os, const T& value) {
   os << value.DebugString();
   return os;
+}
+
+template<typename T, typename InputType>
+T CastWithBoundaryCheck(InputType value) {
+  TCHECK(!IsInf(value));
+  TCHECK(!IsNan(value));
+  TCHECK_GE(value, static_cast<double>(numeric_limits<T>::min()));
+  TCHECK_LE(value, static_cast<double>(numeric_limits<T>::max()));
+  if (is_floating_point<InputType>::value) {
+    return static_cast<T>(round(value));
+  }
+  return static_cast<T>(value);
 }
 
 class EnumType {
@@ -383,52 +399,6 @@ class SegmentTree {
   DISALLOW_COPY_AND_ASSIGN(SegmentTree);
 };
 
-template<class T>
-struct Sum {
- public:
-  Sum() : value_(0) { SetCount(0); }
-  Sum(const T& t) : value_(t.GetRawValue()) {
-    CHECK(t.IsValid());
-    SetCount(1);
-  }
-
-  T GetAverage(int count) const {
-    CheckCount(count);
-    CHECK_GT(count, 0);
-    int64_t new_value = (value_ + count / 2) / count;
-    CHECK_LT(new_value, 0x7fffffff);
-    T result;
-    result.SetRawValue(new_value);
-    return result;
-  }
-
-  Sum<T> operator+(Sum<T> x) const {
-    return Sum<T>(value_ + x.value_, GetCount() + x.GetCount());
-  }
-
-  // SegmentTree用の加算関数．
-  // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
-  static Sum<T> Add(const Sum<T>& a, const Sum<T>& b) { return a + b; }
-
- private:
-#ifndef NDEBUG
-  int32_t GetCount() const { return count_; }
-  void SetCount(int32_t count) { count_ = count; }
-  void CheckCount(int32_t count) const { assert(count_ == count); }
-  
-  int32_t count_;
-#else
-  int32_t GetCount() const { return 0; }
-  void SetCount(int32_t count) {}
-  void CheckCount(int32_t count) const {}
-#endif
-
- private:
-  Sum(int64_t value, int32_t count) : value_(value) { SetCount(count); }
-
-  int64_t value_;
-};
-
 template<typename FinalType, typename ValueType = int32_t>
 struct ScalarBase {
   static constexpr ValueType kInvalid = numeric_limits<ValueType>::max();
@@ -441,6 +411,8 @@ struct ScalarBase {
   template<class InputType>
   void SetRawValue(InputType value)
       { value_ = CastWithBoundaryCheck<ValueType>(value); }
+
+  void Clear() { *this = FinalType(); }
 
   bool IsValid() const { return value_ != kInvalid; }
   void Invalidate() { value_ = kInvalid; }
@@ -540,23 +512,25 @@ struct AdditiveScalarWithWeightBase
 #define AdditiveScalarWithoutWeightBase AdditiveScalarBase
 #endif
 
-template<typename RootType, typename ScalarType = int32_t>
+template<typename RootType>
 struct DifferenceBase
     : public AdditiveScalarWithoutWeightBase<
-          typename RootType::DifferenceType, ScalarType> {
+          typename RootType::DifferenceType, typename RootType::ScalarType> {
   typedef AdditiveScalarWithoutWeightBase<
-              typename RootType::DifferenceType, ScalarType>
+              typename RootType::DifferenceType, typename RootType::ScalarType>
           ParentType;
 
   DifferenceBase() : ParentType() {}
 };
 
-template<typename RootType, typename ScalarType = int32_t>
+template<typename RootType>
 struct ValueBase
-    : public ScalarBase<typename RootType::ValueType, ScalarType> {
-  typedef ScalarBase<typename RootType::ValueType, ScalarType> ParentType;
-  typedef typename RootType::ValueType ValueType;
+    : public ScalarBase<typename RootType::ValueType,
+                        typename RootType::ScalarType> {
+  typedef ScalarBase<typename RootType::ValueType,
+                     typename RootType::ScalarType> ParentType;
   typedef typename RootType::DifferenceType DifferenceType;
+  typedef typename RootType::ValueType ValueType;
 
   ValueBase() : ParentType() { this->Invalidate(); }
 
@@ -585,6 +559,7 @@ struct SumBase
           typename RootType::SumType, int64_t> {
   typedef AdditiveScalarWithoutWeightBase<typename RootType::SumType, int64_t>
           ParentType;
+  typedef typename RootType::DifferenceType DifferenceType;
   typedef typename RootType::ValueType ValueType;
   typedef typename RootType::SumType SumType;
 
@@ -604,6 +579,9 @@ struct SumBase
     return ValueType::InRawValue(this->GetRawValue() / weight);
   }
 
+  // const SumType& operator+=(ValueType value) { return *this += From(value); }
+  // SumType operator+(ValueType value) const { return *this + From(value); }
+
   // SegmentTree用の加算関数．
   // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
   static SumType Add(const SumType& a, const SumType& b) { return a + b; }
@@ -614,10 +592,19 @@ struct SumBase
     result.SetWeight(1);
     return result;
   }
+
+  template<class InputType>
+  static SumType InRawValue(InputType value, double weight) {
+    SumType result;
+    result.SetRawValue(value);
+    result.SetWeight(weight);
+    return result;
+  }
 };
 
 struct TimeRoot {
   typedef int32_t ScalarType;
+
   struct DifferenceType : public DifferenceBase<TimeRoot> {
     DifferenceType() : DifferenceBase<TimeRoot>() {}
 
@@ -628,6 +615,7 @@ struct TimeRoot {
     static DifferenceType InMinute(double minute)
         { return DifferenceType::InRawValue(minute * 60); }
   };
+
   struct ValueType : public ValueBase<TimeRoot> {
     ValueType() : ValueBase<TimeRoot>() {}
 
@@ -778,6 +766,7 @@ struct TimeRoot {
       return ValueType();
     }
   };
+
   struct SumType : public SumBase<TimeRoot> {
     SumType() : SumBase<TimeRoot>() {}
 
@@ -1826,257 +1815,254 @@ class AccumulatedRates {
   DISALLOW_COPY_AND_ASSIGN(AccumulatedRates);
 };
 
-struct AdjustedPrice {
- public:
-  static constexpr int32_t kInvalidPrice = 0x7fffffff;
-  // TODO(imos): 削除する．
-  static constexpr double kBaseAdjustedPrice = 100000000;
-  static constexpr double kAdjustedPriceScale = 10000;
+struct AdjustedPriceRoot {
+  typedef int32_t ScalarType;
 
-  AdjustedPrice() : adjusted_price_(kInvalidPrice) {}
+  struct DifferenceType : public DifferenceBase<AdjustedPriceRoot> {};
 
-  bool operator<(const AdjustedPrice& value) const {
-    if (!IsValid() || !value.IsValid()) { return false; }
-    return GetRawValue() < value.GetRawValue();
-  }
-  COMPARISON_OPERATOR(AdjustedPrice);
+  struct ValueType : public ValueBase<AdjustedPriceRoot> {
+    // TODO(imos): 削除する．
+    static constexpr double kBaseAdjustedPrice = 100000000;
+    static constexpr double kAdjustedPriceScale = 10000;
 
-  void Init(Price price,
-            TimeDifference interval,
-            Price base_price,
-            Volatility volatility,
-            double ratio = 1.0) {
-    PriceDifference price_difference = price - base_price;
-    price_difference *= ratio;
-    price_difference /= sqrt(fabs(interval.GetMinute()));
-    price_difference /= volatility.GetValue();
-    double value = price_difference.GetLogValue() * kAdjustedPriceScale;
-    CHECK(!IsNan(value));
-    CHECK(!IsInf(value));
-    CHECK_GE(value, numeric_limits<int32_t>::min());
-    CHECK_LE(value, numeric_limits<int32_t>::max());
-    adjusted_price_ = static_cast<int32_t>(value);
-  }
+    ValueType() : ValueBase<AdjustedPriceRoot>() {}
 
-  bool InitFuture(const AccumulatedRates& rates,
-                  Time now,
-                  Time to,
-                  PriceDifference price_adjustment) {
-    Price current_price =
-        rates.GetRate(now, now).GetClosePrice() + price_adjustment;
-    if (!current_price.IsValid()) { return false; }
+    void Init(Price price,
+              TimeDifference interval,
+              Price base_price,
+              Volatility volatility,
+              double ratio = 1.0) {
+      try {
+        SetRawValue(
+            (price - base_price).GetLogValue() * ratio
+                / sqrt(fabs(interval.GetMinute())) / volatility.GetValue()
+                * kAdjustedPriceScale);
+      } catch (TException) {
+        LOG(ERROR) <<
+            "price: " << price << ", " <<
+            "interval: " << interval << ", " <<
+            "base_price: " << base_price << ", " <<
+            "volatility: " << volatility << ", " <<
+            "ratio: " << ratio;
+        throw TException();
+      }
+    }
 
-    Volatility current_volatility = rates.GetVolatility(now);
-    if (!current_volatility.IsValid()) { return false; }
+    bool InitFuture(const AccumulatedRates& rates,
+                    Time now,
+                    Time to,
+                    PriceDifference price_adjustment) {
+      Price current_price =
+          rates.GetRate(now, now).GetClosePrice() + price_adjustment;
+      if (!current_price.IsValid()) { return false; }
 
-    if (GetParams().future == Params::Future::CLOSE) {
-      Init(rates.GetRate(now, to).GetClosePrice(), to - now, current_price,
-           current_volatility);
+      Volatility current_volatility = rates.GetVolatility(now);
+      if (!current_volatility.IsValid()) { return false; }
+
+      if (GetParams().future == Params::Future::CLOSE) {
+        Init(rates.GetRate(now, to).GetClosePrice(), to - now, current_price,
+             current_volatility);
+        return true;
+      }
+
+      Price upper_bound =
+          current_volatility.GetPrice(current_price, to - now, 1);
+      Price lower_bound =
+          current_volatility.GetPrice(current_price, to - now, -1);
+
+      Price final_price;
+      {
+        Rate rate = rates.GetRate(now + TimeDifference::InMinute(1), to);
+        if (!rate.IsComplete()) {
+          return false;
+        }
+        final_price = rate.GetClosePrice();
+        if (lower_bound < rate.GetLowPrice() &&
+            rate.GetHighPrice() < upper_bound) {
+          Init(final_price, to - now, current_price, current_volatility);
+          return true;
+        }
+      }
+
+      TimeDifference max_difference = to - now;
+      TimeDifference min_difference = TimeDifference::InMinute(1);
+      while ((max_difference - min_difference).GetMinute() > 0.5) {
+        TimeDifference median_difference = TimeDifference::InMinute(
+            (max_difference.GetMinute() + min_difference.GetMinute()) / 2);
+        Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
+                                  now + median_difference);
+        if (!rate.IsComplete()) {
+          break;
+        }
+
+        final_price = rate.GetClosePrice();
+        if (lower_bound < rate.GetLowPrice() &&
+            rate.GetHighPrice() < upper_bound) {
+          min_difference = median_difference;
+        } else {
+          max_difference = median_difference;
+        }
+      }
+
+      switch (GetParams().future) {
+        case Params::Future::CROSS: {
+          Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
+                                    now + max_difference);
+          final_price = rate.GetClosePrice();
+          break;
+        }
+        case Params::Future::LIMIT: {
+          Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
+                                    now + max_difference);
+          // 1分以下の変動は対応ができないので，しきい値を設けない
+          // NOTE: 効果が不明のためコメントアウト
+          // if (max_difference < TimeDifference::InMinute(1.9)) {
+          //   final_price = rate.GetClosePrice();
+          //   break;
+          // }
+          if (rate.GetLowPrice() < lower_bound &&
+              upper_bound < rate.GetHighPrice()) {
+            final_price = rate.GetClosePrice();
+            if (rate.GetClosePrice() < lower_bound) {
+              final_price = lower_bound;
+            } else if (upper_bound < rate.GetClosePrice()) {
+              final_price = upper_bound;
+            }
+          } else if (rate.GetLowPrice() < lower_bound) {
+            final_price = lower_bound;
+          } else if (upper_bound < rate.GetLowPrice()) {
+            final_price = upper_bound;
+          } else {
+            final_price = rate.GetClosePrice();
+          }
+          break;
+        }
+        case Params::Future::CLOSE: {
+          LOG(FATAL) << "This should not happen.";
+        }
+      }
+
+      switch (GetParams().future_curve) {
+        case Params::FutureCurve::FLAT: {
+          Init(final_price, to - now, current_price, current_volatility);
+          break;
+        }
+        case Params::FutureCurve::SQRT: {
+          Init(final_price, max_difference, current_price, current_volatility);
+          break;
+        }
+        case Params::FutureCurve::LINEAR: {
+          Init(final_price, to - now, current_price, current_volatility,
+               ((to - now).GetMinute() + 1) / (max_difference.GetMinute() + 1));
+          break;
+        }
+        case Params::FutureCurve::LINEAR_CUT: {
+          Init(final_price, to - now, current_price, current_volatility,
+               ((to - now).GetMinute() - max_difference.GetMinute() + 1) /
+                   (max_difference.GetMinute() + 1));
+          break;
+        }
+      }
       return true;
     }
 
-    Price upper_bound =
-        current_volatility.GetPrice(current_price, to - now, 1);
-    Price lower_bound =
-        current_volatility.GetPrice(current_price, to - now, -1);
-
-    Price final_price;
-    {
-      Rate rate = rates.GetRate(now + TimeDifference::InMinute(1), to);
-      if (!rate.IsComplete()) {
-        return false;
-      }
-      final_price = rate.GetClosePrice();
-      if (lower_bound < rate.GetLowPrice() &&
-          rate.GetHighPrice() < upper_bound) {
-        Init(final_price, to - now, current_price, current_volatility);
-        return true;
-      }
+    Price GetPrice(TimeDifference interval,
+                   Price base_price,
+                   Volatility volatility) const {
+      PriceDifference price_difference;
+      price_difference.SetLogValue(GetRawValue() / kAdjustedPriceScale);
+      price_difference *= sqrt(fabs(interval.GetMinute()));
+      price_difference *= volatility.GetValue();
+      return base_price + price_difference;
     }
 
-    TimeDifference max_difference = to - now;
-    TimeDifference min_difference = TimeDifference::InMinute(1);
-    while ((max_difference - min_difference).GetMinute() > 0.5) {
-      TimeDifference median_difference = TimeDifference::InMinute(
-          (max_difference.GetMinute() + min_difference.GetMinute()) / 2);
-      Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
-                                now + median_difference);
-      if (!rate.IsComplete()) {
-        break;
-      }
-
-      final_price = rate.GetClosePrice();
-      if (lower_bound < rate.GetLowPrice() &&
-          rate.GetHighPrice() < upper_bound) {
-        min_difference = median_difference;
-      } else {
-        max_difference = median_difference;
-      }
+    // 表示用
+    Price GetRegularizedPrice(
+        TimeDifference interval = TimeDifference::InMinute(1)) const {
+      return GetPrice(
+          interval, Price::InRealPrice(1.0), Volatility::InRatio(1e-4));
     }
 
-    switch (GetParams().future) {
-      case Params::Future::CROSS: {
-        Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
-                                  now + max_difference);
-        final_price = rate.GetClosePrice();
-        break;
-      }
-      case Params::Future::LIMIT: {
-        Rate rate = rates.GetRate(now + TimeDifference::InMinute(1),
-                                  now + max_difference);
-        // 1分以下の変動は対応ができないので，しきい値を設けない
-        // NOTE: 効果が不明のためコメントアウト
-        // if (max_difference < TimeDifference::InMinute(1.9)) {
-        //   final_price = rate.GetClosePrice();
-        //   break;
-        // }
-        if (rate.GetLowPrice() < lower_bound &&
-            upper_bound < rate.GetHighPrice()) {
-          final_price = rate.GetClosePrice();
-          if (rate.GetClosePrice() < lower_bound) {
-            final_price = lower_bound;
-          } else if (upper_bound < rate.GetClosePrice()) {
-            final_price = upper_bound;
-          }
-        } else if (rate.GetLowPrice() < lower_bound) {
-          final_price = lower_bound;
-        } else if (upper_bound < rate.GetLowPrice()) {
-          final_price = upper_bound;
-        } else {
-          final_price = rate.GetClosePrice();
-        }
-        break;
-      }
-      case Params::Future::CLOSE: {
-        LOG(FATAL) << "This should not happen.";
-      }
+    double GetRatio() const {
+      return GetRegularizedPrice().GetRealPrice();
     }
 
-    switch (GetParams().future_curve) {
-      case Params::FutureCurve::FLAT: {
-        Init(final_price, to - now, current_price, current_volatility);
-        break;
-      }
-      case Params::FutureCurve::SQRT: {
-        Init(final_price, max_difference, current_price, current_volatility);
-        break;
-      }
-      case Params::FutureCurve::LINEAR: {
-        Init(final_price, to - now, current_price, current_volatility,
-             ((to - now).GetMinute() + 1) / (max_difference.GetMinute() + 1));
-        break;
-      }
-      case Params::FutureCurve::LINEAR_CUT: {
-        Init(final_price, to - now, current_price, current_volatility,
-             ((to - now).GetMinute() - max_difference.GetMinute() + 1) /
-                 (max_difference.GetMinute() + 1));
-        break;
-      }
-    }
-    return true;
-  }
-
-  Price GetPrice(TimeDifference interval,
-                 Price base_price,
-                 Volatility volatility) const {
-    PriceDifference price_difference;
-    price_difference.SetLogValue(adjusted_price_ / kAdjustedPriceScale);
-    price_difference *= sqrt(fabs(interval.GetMinute()));
-    price_difference *= volatility.GetValue();
-    return base_price + price_difference;
-  }
-
-  // 表示用
-  Price GetRegularizedPrice(
-      TimeDifference interval = TimeDifference::InMinute(1)) const {
-    return GetPrice(
-        interval, Price::InRealPrice(1.0), Volatility::InRatio(1e-4));
-  }
-
-  double GetRatio() const {
-    return GetRegularizedPrice().GetRealPrice();
-  }
-
-  double MeasureDistance(AdjustedPrice value) const {
-    double price_difference =
-        ((double)adjusted_price_ - value.adjusted_price_) / kBaseAdjustedPrice;
-    return price_difference * price_difference;
-  }
-
-  bool IsValid() const { return adjusted_price_ != kInvalidPrice; }
-  int32_t GetRawValue() const { return adjusted_price_; }
-  void SetRawValue(int64_t value) {
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    adjusted_price_ = static_cast<int32_t>(value);
-  }
-
-  void Clear() { adjusted_price_ = kInvalidPrice; }
-
-  string DebugString() const {
-    return GetRegularizedPrice(TimeDifference::InMinute(60)).DebugString();
-  }
-
-  static void Test() {
-    fprintf(stderr, "Testing AdjustedPrice...\n");
-
-    // 価格解像度を確認（）
-    {
-      AdjustedPrice price;
-      price.SetRawValue(1);
-      double ratio = price.GetRatio();
-      fprintf(stderr, "- Minimal resolution: %.3e\n", ratio - 1);
-      fprintf(stderr, "- Maximal resolution: %.3e\n",
-              (ratio - 1) * numeric_limits<int32_t>::max());
-      CHECK_LE(1, ratio);
-      // 0.1pipsの差が表現可能であるか
-      CHECK_LE(ratio, 1.00001) << "AdjustedPrice cannot represents 0.1 pips "
-                               << "difference in one minute.";
-      // exp(10) が表現可能であるかどうか
-      CHECK_GT((ratio - 1) * numeric_limits<int32_t>::max(), 10);
+    double MeasureDistance(ValueType value) const {
+      double price_difference =
+          (GetRawValue() - value.GetRawValue()) / kBaseAdjustedPrice;
+      return price_difference * price_difference;
     }
 
-    // 価格の復元
-    {
-      AdjustedPrice price;
-      price.Init(Price::InRealPrice(100.01),
-                 TimeDifference::InMinute(1.0),
-                 Price::InRealPrice(100),
-                 Volatility::InRatio(log(100.01 / 100)));
-      CHECK_NEAR(
-          price.GetPrice(
-              TimeDifference::InMinute(1.0),
-              Price::InRealPrice(100),
-              Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
-          100.01,
-          1e-4);
-      CHECK_NEAR(
-          price.GetPrice(
-              TimeDifference::InMinute(1.0),
-              Price::InRealPrice(200),
-              Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
-          200.02,
-          1e-4);
-      CHECK_NEAR(
-          price.GetPrice(
-              TimeDifference::InMinute(4.0),
-              Price::InRealPrice(100),
-              Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
-          100.02,
-          1e-4);
-      CHECK_NEAR(
-          price.GetPrice(
-              TimeDifference::InMinute(1.0),
-              Price::InRealPrice(100),
-              Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
-          100.02,
-          1e-4);
+    string DebugString() const {
+      return GetRegularizedPrice(TimeDifference::InMinute(60)).DebugString();
     }
-  }
+  };
 
- private:
-  int32_t adjusted_price_;
+  struct SumType : public SumBase<AdjustedPriceRoot> {
+    SumType() : SumBase<AdjustedPriceRoot>() {}
+  };
 };
+
+typedef typename AdjustedPriceRoot::DifferenceType AdjustedPriceDifference;
+typedef typename AdjustedPriceRoot::ValueType AdjustedPrice;
+typedef typename AdjustedPriceRoot::SumType AdjustedPriceSum;
+
+void AdjustedPriceTest() {
+  fprintf(stderr, "Testing AdjustedPrice...\n");
+
+  // 価格解像度を確認（）
+  {
+    AdjustedPrice price;
+    price.SetRawValue(1);
+    double ratio = price.GetRatio();
+    fprintf(stderr, "- Minimal resolution: %.3e\n", ratio - 1);
+    fprintf(stderr, "- Maximal resolution: %.3e\n",
+            (ratio - 1) * numeric_limits<int32_t>::max());
+    CHECK_LE(1, ratio);
+    // 0.1pipsの差が表現可能であるか
+    CHECK_LE(ratio, 1.00001) << "AdjustedPrice cannot represents 0.1 pips "
+                             << "difference in one minute.";
+    // exp(10) が表現可能であるかどうか
+    CHECK_GT((ratio - 1) * numeric_limits<int32_t>::max(), 10);
+  }
+
+  // 価格の復元
+  {
+    AdjustedPrice price;
+    price.Init(Price::InRealPrice(100.01),
+               TimeDifference::InMinute(1.0),
+               Price::InRealPrice(100),
+               Volatility::InRatio(log(100.01 / 100)));
+    CHECK_NEAR(
+        price.GetPrice(
+            TimeDifference::InMinute(1.0),
+            Price::InRealPrice(100),
+            Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+        100.01,
+        1e-4);
+    CHECK_NEAR(
+        price.GetPrice(
+            TimeDifference::InMinute(1.0),
+            Price::InRealPrice(200),
+            Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+        200.02,
+        1e-4);
+    CHECK_NEAR(
+        price.GetPrice(
+            TimeDifference::InMinute(4.0),
+            Price::InRealPrice(100),
+            Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+        100.02,
+        1e-4);
+    CHECK_NEAR(
+        price.GetPrice(
+            TimeDifference::InMinute(1.0),
+            Price::InRealPrice(100),
+            Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
+        100.02,
+        1e-4);
+  }
+}
 
 struct AdjustedPriceStat {
  public:
@@ -2125,8 +2111,6 @@ struct AdjustedPriceStat {
   int64_t adjusted_price_sum_;
   int64_t adjusted_price_sum2_;
 };
-
-typedef Sum<AdjustedPrice> AdjustedPriceSum;
 
 struct AdjustedRate {
  public:
@@ -2200,9 +2184,9 @@ struct AdjustedRateSum {
  public:
   AdjustedRateSum() {}
   AdjustedRateSum(const AdjustedRate& t)
-      : high_(t.GetHighPrice()),
-        low_(t.GetLowPrice()),
-        average_(t.GetAveragePrice()) {}
+      : high_(AdjustedPriceSum::From(t.GetHighPrice())),
+        low_(AdjustedPriceSum::From(t.GetLowPrice())),
+        average_(AdjustedPriceSum::From(t.GetAveragePrice())) {}
 
   AdjustedRate GetAverage(int count) const {
     AdjustedRate result;
@@ -2902,7 +2886,7 @@ struct Feature {
               price_adjustment)) {
         return false;
       }
-      future_price_sum = future_price_sum + future_price;
+      future_price_sum += AdjustedPriceSum::From(future_price);
       count++;
     }
     future_ = future_price_sum.GetAverage(count);
@@ -2968,7 +2952,7 @@ struct FeatureSum {
     for (size_t i = 0; i < kFeatureSize; i++) {
       past_[i] = AdjustedRateSum(t.GetPastFeature().GetPastRate(i));
     }
-    future_ = AdjustedPriceSum(t.future_);
+    future_ = AdjustedPriceSum::From(t.future_);
   }
 
   Feature GetAverage(int count) const {
@@ -3768,7 +3752,7 @@ void Test() {
   SegmentTree<int32_t, const int32_t&, max<int32_t>>::Test();
   AccumulatedRates::Test();
   Volatility::Test();
-  AdjustedPrice::Test();
+  AdjustedPriceTest();
 }
 
 int main(int argc, char** argv) {
