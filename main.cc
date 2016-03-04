@@ -1184,6 +1184,13 @@ struct Volatility {
     return result;
   }
 
+  static Volatility InPriceAndTime(
+      PriceDifference price_difference,
+      TimeDifference time_difference) {
+    return InRatio(
+        price_difference.GetLogValue() / sqrt(time_difference.GetMinute()));
+  }
+
  private:
   Volatility(double volatility)
       : volatility_((int32_t)round(volatility / kVolatilityScaleDeprecated)) {
@@ -1238,6 +1245,21 @@ TEST(Volatility) {
     volatility.SetValueDeprecated(10000);
     double value = volatility.GetValueDeprecated();
     CHECK(fabs(value - 10000) < 1e-3) << "Inconsistent interface: " << value;
+  }
+
+  // 入出力を確認
+  {
+    double price_difference = Price::InRealPrice(101).GetLogPrice() -
+                              Price::InRealPrice(100).GetLogPrice();
+    assert(!IsNan(price_difference) && !IsInf(price_difference));
+    Volatility volatility_deprecated;
+    volatility_deprecated.SetValueDeprecated(
+        price_difference * price_difference);
+
+    CHECK_EQ(volatility_deprecated.GetRawValue(),
+             Volatility::InPriceAndTime(
+                 PriceDifference::InRatio(1.01),
+                 TimeDifference::InMinute(1)).GetRawValue());
   }
 
   // 後方互換性の確認
@@ -1299,6 +1321,10 @@ struct VolatilitySum {
   // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
   static VolatilitySum Add(const VolatilitySum& a, const VolatilitySum& b) {
     return a + b;
+  }
+
+  static VolatilitySum From(const Volatility& value) {
+    return VolatilitySum(value);
   }
 
  private:
@@ -1476,14 +1502,8 @@ class Rates {
           > kShortVolatilityDuration * 2) {
         return Volatility::Invalid();
       }
-      double scale_factor = sqrt((current_time - previous_time).GetMinute());
-      double price_difference =
-          (current_price.GetLogPrice()
-           - previous_price.GetLogPrice()) / scale_factor;
-      assert(!IsNan(price_difference) && !IsInf(price_difference));
-      Volatility volatility;
-      volatility.SetValueDeprecated(price_difference * price_difference);
-      sum += volatility;
+      sum += Volatility::InPriceAndTime(
+          current_price - previous_price, current_time - previous_time);
     }
     assert(sum.GetCount() == kShortVolatilityDuration);
     return sum.GetAverageVolatility();
