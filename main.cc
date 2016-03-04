@@ -69,8 +69,8 @@ const double kHighAndLowDistanceWeight = 0;
 // 予測に用いる過去の指標の割合（0.05程度が目安）
 const double kPredictRatio = 0.01;
 
-constexpr int kQFeatureSize = 1000;
-constexpr int kQRedundancy = 50;
+constexpr int kQFeatureSize = 400;
+constexpr int kQRedundancy = 20;
 
 template<typename T>
 int Sign(T x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
@@ -351,6 +351,23 @@ void ParallelFor(
   });
 }
 
+TEST(Parallel) {
+  int sum = 0;
+  mutex sum_mutex;
+  ParallelFor<size_t>(
+      1 /* begin */, 1000 /* end */, 1 /* step */, 10 /* chunk_step */,
+      [&](size_t value) {
+        volatile size_t volatile_value = 0;
+        for (volatile size_t i = 0; i < value; i++) { volatile_value++; }
+
+        {
+          lock_guard<mutex> sum_mutex_guard(sum_mutex);
+          sum += volatile_value;
+        }
+      });
+  CHECK_EQ(sum, 499500);
+}
+
 #define CLEAR_LINE "\033[1A\033[2K"
 
 template<typename T, typename X, X F(const X&, const X&)>
@@ -380,30 +397,17 @@ class SegmentTree {
     return InternalQuery(from, to, 0);
   }
 
-  static void Test() {
-    fprintf(stderr, "Testing SegmentTree...\n");
-
-    SegmentTree<T, const T&, min<T>> small({1, 2, 3});
-    CHECK_EQ(1, small.Query(0, 0));
-    CHECK_EQ(2, small.Query(1, 1));
-    CHECK_EQ(3, small.Query(2, 2));
-    CHECK_EQ(1, small.Query(0, 1));
-    CHECK_EQ(2, small.Query(1, 2));
-    CHECK_EQ(1, small.Query(0, 2));
-
-    vector<int32_t> data;
-    for (int i = 0; i < 29; i++) {
-      data.push_back(Rand() % 100);
+  T Naive(int from, int to) const {
+    CHECK_LE(0, from);
+    CHECK_LT(from, data_[0].size());
+    CHECK_LE(0, to);
+    CHECK_LT(to, data_[0].size());
+    if (from > to) { return Naive(to, from); }
+    T result = data_[0][(size_t)from];
+    for (int i = from; i <= to; i++) {
+      result = F(result, data_[0][(size_t)i]);
     }
-    SegmentTree segment_tree(data);
-    for (int i = 0; i < (int)data.size(); i++) {
-      for (int j = i; j < (int)data.size(); j++) {
-        CHECK_EQ(segment_tree.Query(i, j), segment_tree.Naive(i, j))
-            << "i=" << i << ", j=" << j;
-      }
-    }
-
-    fprintf(stderr, "SegmentTree test successfully passed.\n");
+    return result;
   }
 
  private:
@@ -424,21 +428,32 @@ class SegmentTree {
     return InternalQuery(from / 2, to / 2, depth + 1);
   }
 
-  T Naive(int from, int to) const {
-    assert(0 <= from && from < (int)data_[0].size());
-    assert(0 <= to && to < (int)data_[0].size());
-    if (from > to) { return Naive(to, from); }
-    T result = data_[0][(size_t)from];
-    for (int i = from; i <= to; i++) {
-      result = F(result, data_[0][(size_t)i]);
-    }
-    return result;
-  }
-
   vector<vector<T>> data_;
 
   DISALLOW_COPY_AND_ASSIGN(SegmentTree);
 };
+
+TEST(SegmentTree) {
+  SegmentTree<int, const int&, min<int>> small({1, 2, 3});
+  CHECK_EQ(1, small.Query(0, 0));
+  CHECK_EQ(2, small.Query(1, 1));
+  CHECK_EQ(3, small.Query(2, 2));
+  CHECK_EQ(1, small.Query(0, 1));
+  CHECK_EQ(2, small.Query(1, 2));
+  CHECK_EQ(1, small.Query(0, 2));
+
+  vector<int> data;
+  for (int i = 0; i < 29; i++) {
+    data.push_back(Rand() % 100);
+  }
+  SegmentTree<int, const int&, min<int>> segment_tree(data);
+  for (int i = 0; i < (int)data.size(); i++) {
+    for (int j = i; j < (int)data.size(); j++) {
+      CHECK_EQ(segment_tree.Query(i, j), segment_tree.Naive(i, j))
+          << "i=" << i << ", j=" << j;
+    }
+  }
+}
 
 template<typename FinalType, typename ValueType = int32_t>
 struct ScalarBase {
@@ -866,9 +881,13 @@ typedef typename PriceRoot::ValueType Price;
 typedef typename PriceRoot::SumType PriceSum;
 
 TEST(Price) {
+  LOG(INFO) <<  "sizeof(PriceDifference): " << sizeof(PriceDifference);
+  LOG(INFO) <<  "sizeof(Price): " << sizeof(Price);
+  LOG(INFO) <<  "sizeof(PriceSum): " << sizeof(PriceSum);
+
   PriceDifference d;
   CHECK(d.IsValid());
-  CHECK_EQ(d.GetLogValue(), 0);
+  CHECK_EQ(0, d.GetLogValue());
   d.SetLogValue(0.01);
   CHECK_NEAR(d.GetLogValue(), 0.01, 1e-6);
 
@@ -897,6 +916,17 @@ TEST(Price) {
   CHECK_NEAR((Price::InRealPrice(100.01) -
               Price::InRealPrice(100.02)).GetLogValue(),
              -log(100.02 / 100.01), 1e-8);
+
+  PriceSum s;
+  CHECK(s.IsValid());
+  CHECK_EQ(0, s.GetRawValue());
+  s += PriceSum::From(Price::InRealPrice(100.01));
+  CHECK_NEAR(100.01, s.GetAverage(1).GetRealPrice(), 1e-4);
+  s += PriceSum::From(Price::InRealPrice(200.01));
+  CHECK_NEAR(exp((log(100.01) + log(200.01)) * 0.5),
+             s.GetAverage(2).GetRealPrice(), 1e-4);
+  s -= PriceSum::From(Price::InRealPrice(100.01));
+  CHECK_NEAR(200.01, s.GetAverage(1).GetRealPrice(), 1e-4);
 }
 
 // [start_time, end_time) の時間を 1 分単位でイテレートします．
@@ -3799,7 +3829,6 @@ void Test() {
 
   fprintf(stderr, "sizeof(Price): %lu\n", sizeof(Price));
   fprintf(stderr, "sizeof(PriceSum): %lu\n", sizeof(PriceSum));
-  SegmentTree<int32_t, const int32_t&, max<int32_t>>::Test();
   AccumulatedRates::Test();
   Volatility::Test();
   RunAllTests();
