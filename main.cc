@@ -47,7 +47,7 @@ int RegisterTestFunction(const string& name, function<void()> f) {
   test_functions->emplace_back(name, f);
   return test_functions->size();
 }
-void RunAllTests() {
+void Test() {
   if (test_functions == nullptr) {
     LOG(ERROR) << "No tests to run.";
     return;
@@ -76,6 +76,12 @@ template<typename T>
 int Sign(T x) { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
 bool IsNan(double value) { return ::std::isnan(value); }
 bool IsInf(double value) { return ::std::isinf(value); }
+
+TEST(Sign) {
+  CHECK_EQ(1, Sign(0.1));
+  CHECK_EQ(0, Sign(0));
+  CHECK_EQ(-1, Sign(-0.1));
+}
 
 string StringPrintf(const char* const format, ...) {
   va_list ap;
@@ -1178,61 +1184,6 @@ struct Volatility {
     return result;
   }
 
-  static void Test() {
-    fprintf(stderr, "Testing Volatility...\n");
-
-    // ボラティリティ解像度を確認
-    {
-      Volatility volatility;
-      volatility.SetRawValue(1);
-      double ratio = volatility.GetPrice(Price::InRealPrice(1.0),
-                                         TimeDifference::InMinute(60),
-                                         1.0).GetRealPrice();
-      fprintf(stderr, "- Minimal resolution: %.3e\n", ratio - 1);
-      fprintf(stderr, "- Maximal resolution: %.3e\n",
-              (ratio - 1) * sqrt(numeric_limits<int32_t>::max()));
-      CHECK_LE(1, ratio);
-      // 0.1pipsの差が表現可能であるか
-      CHECK_LE(ratio, 1.00001) << "Volatility cannot represents 0.1 pips "
-                               << "difference in 60 minutes.";
-      // exp(10) が表現可能であるかどうか
-      // TODO(imos): 表現できていないので要修正
-      CHECK_GT((ratio - 1) * sqrt(numeric_limits<int32_t>::max()), 0.3);
-    }
-
-    // 入出力を確認
-    {
-      Volatility volatility;
-      volatility.SetValue(0.001);
-      double value = volatility.GetValue();
-      CHECK(fabs(value - 0.001) < 1e-7) << "Inconsistent interface: " << value;
-    }
-
-    // 入出力を確認
-    {
-      Volatility volatility;
-      volatility.SetValue(0.001);
-      double ratio = volatility.GetPrice(Price::InRealPrice(1.0),
-                                         TimeDifference::InMinute(1),
-                                         1.0).GetRealPrice();
-      CHECK(fabs(ratio - 1.001) < 1e-5) << "Inconsistent interface: " << ratio;
-    }
-
-    // 入出力を確認
-    {
-      Volatility volatility;
-      volatility.SetValueDeprecated(10000);
-      double value = volatility.GetValueDeprecated();
-      CHECK(fabs(value - 10000) < 1e-3) << "Inconsistent interface: " << value;
-    }
-
-    // 後方互換性の確認
-    {
-      CHECK_EQ(1000000, Volatility::InRatio(0.001).GetRawValue());
-      CHECK_EQ(4000000, Volatility::InRatio(0.002).GetRawValue());
-    }
-  }
-
  private:
   Volatility(double volatility)
       : volatility_((int32_t)round(volatility / kVolatilityScaleDeprecated)) {
@@ -1242,6 +1193,59 @@ struct Volatility {
 
   int32_t volatility_;
 };
+
+TEST(Volatility) {
+  // ボラティリティ解像度を確認
+  {
+    Volatility volatility;
+    volatility.SetRawValue(1);
+    double ratio = volatility.GetPrice(Price::InRealPrice(1.0),
+                                       TimeDifference::InMinute(60),
+                                       1.0).GetRealPrice();
+    fprintf(stderr, "- Minimal resolution: %.3e\n", ratio - 1);
+    fprintf(stderr, "- Maximal resolution: %.3e\n",
+            (ratio - 1) * sqrt(numeric_limits<int32_t>::max()));
+    CHECK_LE(1, ratio);
+    // 0.1pipsの差が表現可能であるか
+    CHECK_LE(ratio, 1.00001) << "Volatility cannot represents 0.1 pips "
+                             << "difference in 60 minutes.";
+    // exp(10) が表現可能であるかどうか
+    // TODO(imos): 表現できていないので要修正
+    CHECK_GT((ratio - 1) * sqrt(numeric_limits<int32_t>::max()), 0.3);
+  }
+
+  // 入出力を確認
+  {
+    Volatility volatility;
+    volatility.SetValue(0.001);
+    double value = volatility.GetValue();
+    CHECK(fabs(value - 0.001) < 1e-7) << "Inconsistent interface: " << value;
+  }
+
+  // 入出力を確認
+  {
+    Volatility volatility;
+    volatility.SetValue(0.001);
+    double ratio = volatility.GetPrice(Price::InRealPrice(1.0),
+                                       TimeDifference::InMinute(1),
+                                       1.0).GetRealPrice();
+    CHECK(fabs(ratio - 1.001) < 1e-5) << "Inconsistent interface: " << ratio;
+  }
+
+  // 入出力を確認
+  {
+    Volatility volatility;
+    volatility.SetValueDeprecated(10000);
+    double value = volatility.GetValueDeprecated();
+    CHECK(fabs(value - 10000) < 1e-3) << "Inconsistent interface: " << value;
+  }
+
+  // 後方互換性の確認
+  {
+    CHECK_EQ(1000000, Volatility::InRatio(0.001).GetRawValue());
+    CHECK_EQ(4000000, Volatility::InRatio(0.002).GetRawValue());
+  }
+}
 
 struct VolatilitySum {
  public:
@@ -1762,98 +1766,11 @@ class AccumulatedRates {
                           .DebugString();
   }
 
-  static void Test() {
-    fprintf(stderr, "Testing AccumulatedRates...\n");
-
-    vector<Rate> raw_rates(3);
-    raw_rates[0].SetTime(Time::InMinute(1001));
-    raw_rates[0].SetOpenPrice(Price::InRawValue(100));
-    raw_rates[0].SetHighPrice(Price::InRawValue(120));
-    raw_rates[0].SetLowPrice(Price::InRawValue(90));
-    raw_rates[0].SetClosePrice(Price::InRawValue(110));
-    raw_rates[0].SetAveragePrice(Price::InRawValue(105));
-    raw_rates[1].SetTime(Time::InMinute(1002));
-    raw_rates[1].SetOpenPrice(Price::InRawValue(105));
-    raw_rates[1].SetHighPrice(Price::InRawValue(125));
-    raw_rates[1].SetLowPrice(Price::InRawValue(95));
-    raw_rates[1].SetClosePrice(Price::InRawValue(115));
-    raw_rates[1].SetAveragePrice(Price::InRawValue(110));
-    raw_rates[2].SetTime(Time::InMinute(1004));
-    raw_rates[2].SetOpenPrice(Price::InRawValue(110));
-    raw_rates[2].SetHighPrice(Price::InRawValue(130));
-    raw_rates[2].SetLowPrice(Price::InRawValue(100));
-    raw_rates[2].SetClosePrice(Price::InRawValue(120));
-    raw_rates[2].SetAveragePrice(Price::InRawValue(115));
-
-    AccumulatedRates rates{"test case", Rates(raw_rates)};
-    {
-      assert(rates.GetDenseIndexOrNext(Time::InMinute(1000)) == 0);
-      assert(rates.GetDenseIndexOrNext(Time::InMinute(1001)) == 0);
-      assert(rates.GetDenseIndexOrNext(Time::InMinute(1002)) == 1);
-      assert(rates.GetDenseIndexOrNext(Time::InMinute(1003)) == 2);
-      assert(rates.GetDenseIndexOrNext(Time::InMinute(1004)) == 2);
-      assert(rates.GetDenseIndexOrNext(Time::InMinute(1005)) == 3);
-      assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1000)) == -1);
-      assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1001)) == 0);
-      assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1002)) == 1);
-      assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1003)) == 1);
-      assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1004)) == 2);
-      assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1005)) == 2);
-    }
-    {
-      Rate rate = rates.GetRate(Time::InMinute(500), Time::InMinute(1000));
-      assert(rates.Count(Time::InMinute(500), Time::InMinute(1000)) == 0);
-      assert(!rate.IsValid());
-      assert(!rate.GetTime().IsValid());
-      assert(!rate.GetOpenPrice().IsValid()); 
-      assert(!rate.GetHighPrice().IsValid()); 
-      assert(!rate.GetLowPrice().IsValid()); 
-      assert(!rate.GetClosePrice().IsValid()); 
-      assert(!rate.GetAveragePrice().IsValid()); 
-    }
-    {
-      Rate rate = rates.GetRate(Time::InMinute(1001), Time::InMinute(1004));
-      assert(rates.Count(Time::InMinute(1001), Time::InMinute(1004)) == 3);
-      assert(rate.IsValid());
-      assert(fabs(rate.GetTime().GetMinute() - 1002.33333) < 1e-5);
-      assert(rate.GetOpenPrice().GetLogPrice() == 100); 
-      assert(rate.GetHighPrice().GetLogPrice() == 130); 
-      assert(rate.GetLowPrice().GetLogPrice() == 90); 
-      assert(rate.GetClosePrice().GetLogPrice() == 120); 
-      assert(rate.GetAveragePrice().GetLogPrice() == 110); 
-    }
-    {
-      Rate rate = rates.GetRate(Time::InMinute(1001), Time::InMinute(1002));
-      assert(rates.Count(Time::InMinute(1001), Time::InMinute(1002)) == 2);
-      assert(rate.IsValid());
-      assert(fabs(rate.GetTime().GetMinute() - 1001.5) < 1e-3);
-      CHECK_EQ(rate.GetOpenPrice().GetLogPrice(), 100);
-      CHECK_EQ(rate.GetHighPrice().GetLogPrice(), 125); 
-      CHECK_EQ(rate.GetLowPrice().GetLogPrice(), 90); 
-      CHECK_EQ(rate.GetClosePrice().GetLogPrice(), 115); 
-      CHECK_EQ(rate.GetAveragePrice().GetLogPrice(), 108); 
-    }
-    {
-      Rate rate = rates.GetRate(Time::InMinute(1005), Time::InMinute(1005));
-      assert(rates.Count(Time::InMinute(1005), Time::InMinute(1005)) == 0);
-      assert(!rate.IsValid());
-      assert(!rate.GetTime().IsValid());
-      assert(!rate.GetOpenPrice().IsValid()); 
-      assert(!rate.GetHighPrice().IsValid()); 
-      assert(!rate.GetLowPrice().IsValid()); 
-      assert(!rate.GetClosePrice().IsValid()); 
-      assert(!rate.GetAveragePrice().IsValid()); 
-    }
-
-    fprintf(stderr, "AccumulatedRates test successfully passed.\n");
-  }
-
   Time GetStartTime() const { return start_time_; }
   Time GetEndTime() const { return end_time_; }
 
   const string& GetName() const { return name_; }
 
- private:
   bool HasDenseIndex(int index) const {
     assert(0 <= index && index < (int)count_.size());
     return count_[(size_t)index] !=
@@ -1884,6 +1801,7 @@ class AccumulatedRates {
     return count_[(size_t)index];
   }
 
+ private:
   string name_;
   DailyVolatility winter_daily_volatility_;
   DailyVolatility summer_daily_volatility_;
@@ -1901,6 +1819,90 @@ class AccumulatedRates {
 
   DISALLOW_COPY_AND_ASSIGN(AccumulatedRates);
 };
+
+TEST(AccumulatedRates) {
+  vector<Rate> raw_rates(3);
+  raw_rates[0].SetTime(Time::InMinute(1001));
+  raw_rates[0].SetOpenPrice(Price::InRawValue(100));
+  raw_rates[0].SetHighPrice(Price::InRawValue(120));
+  raw_rates[0].SetLowPrice(Price::InRawValue(90));
+  raw_rates[0].SetClosePrice(Price::InRawValue(110));
+  raw_rates[0].SetAveragePrice(Price::InRawValue(105));
+  raw_rates[1].SetTime(Time::InMinute(1002));
+  raw_rates[1].SetOpenPrice(Price::InRawValue(105));
+  raw_rates[1].SetHighPrice(Price::InRawValue(125));
+  raw_rates[1].SetLowPrice(Price::InRawValue(95));
+  raw_rates[1].SetClosePrice(Price::InRawValue(115));
+  raw_rates[1].SetAveragePrice(Price::InRawValue(110));
+  raw_rates[2].SetTime(Time::InMinute(1004));
+  raw_rates[2].SetOpenPrice(Price::InRawValue(110));
+  raw_rates[2].SetHighPrice(Price::InRawValue(130));
+  raw_rates[2].SetLowPrice(Price::InRawValue(100));
+  raw_rates[2].SetClosePrice(Price::InRawValue(120));
+  raw_rates[2].SetAveragePrice(Price::InRawValue(115));
+
+  AccumulatedRates rates{"test case", Rates(raw_rates)};
+  {
+    assert(rates.GetDenseIndexOrNext(Time::InMinute(1000)) == 0);
+    assert(rates.GetDenseIndexOrNext(Time::InMinute(1001)) == 0);
+    assert(rates.GetDenseIndexOrNext(Time::InMinute(1002)) == 1);
+    assert(rates.GetDenseIndexOrNext(Time::InMinute(1003)) == 2);
+    assert(rates.GetDenseIndexOrNext(Time::InMinute(1004)) == 2);
+    assert(rates.GetDenseIndexOrNext(Time::InMinute(1005)) == 3);
+    assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1000)) == -1);
+    assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1001)) == 0);
+    assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1002)) == 1);
+    assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1003)) == 1);
+    assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1004)) == 2);
+    assert(rates.GetDenseIndexOrPrevious(Time::InMinute(1005)) == 2);
+  }
+  {
+    Rate rate = rates.GetRate(Time::InMinute(500), Time::InMinute(1000));
+    assert(rates.Count(Time::InMinute(500), Time::InMinute(1000)) == 0);
+    assert(!rate.IsValid());
+    assert(!rate.GetTime().IsValid());
+    assert(!rate.GetOpenPrice().IsValid()); 
+    assert(!rate.GetHighPrice().IsValid()); 
+    assert(!rate.GetLowPrice().IsValid()); 
+    assert(!rate.GetClosePrice().IsValid()); 
+    assert(!rate.GetAveragePrice().IsValid()); 
+  }
+  {
+    Rate rate = rates.GetRate(Time::InMinute(1001), Time::InMinute(1004));
+    assert(rates.Count(Time::InMinute(1001), Time::InMinute(1004)) == 3);
+    assert(rate.IsValid());
+    assert(fabs(rate.GetTime().GetMinute() - 1002.33333) < 1e-5);
+    assert(rate.GetOpenPrice().GetLogPrice() == 100); 
+    assert(rate.GetHighPrice().GetLogPrice() == 130); 
+    assert(rate.GetLowPrice().GetLogPrice() == 90); 
+    assert(rate.GetClosePrice().GetLogPrice() == 120); 
+    assert(rate.GetAveragePrice().GetLogPrice() == 110); 
+  }
+  {
+    Rate rate = rates.GetRate(Time::InMinute(1001), Time::InMinute(1002));
+    assert(rates.Count(Time::InMinute(1001), Time::InMinute(1002)) == 2);
+    assert(rate.IsValid());
+    assert(fabs(rate.GetTime().GetMinute() - 1001.5) < 1e-3);
+    CHECK_EQ(rate.GetOpenPrice().GetLogPrice(), 100);
+    CHECK_EQ(rate.GetHighPrice().GetLogPrice(), 125); 
+    CHECK_EQ(rate.GetLowPrice().GetLogPrice(), 90); 
+    CHECK_EQ(rate.GetClosePrice().GetLogPrice(), 115); 
+    CHECK_EQ(rate.GetAveragePrice().GetLogPrice(), 108); 
+  }
+  {
+    Rate rate = rates.GetRate(Time::InMinute(1005), Time::InMinute(1005));
+    assert(rates.Count(Time::InMinute(1005), Time::InMinute(1005)) == 0);
+    assert(!rate.IsValid());
+    assert(!rate.GetTime().IsValid());
+    assert(!rate.GetOpenPrice().IsValid()); 
+    assert(!rate.GetHighPrice().IsValid()); 
+    assert(!rate.GetLowPrice().IsValid()); 
+    assert(!rate.GetClosePrice().IsValid()); 
+    assert(!rate.GetAveragePrice().IsValid()); 
+  }
+
+  fprintf(stderr, "AccumulatedRates test successfully passed.\n");
+}
 
 struct AdjustedPriceRoot {
   typedef int32_t ScalarType;
@@ -3821,18 +3823,6 @@ class Simulator {
 
   DISALLOW_COPY_AND_ASSIGN(Simulator);
 };
-
-void Test() {
-  assert(IsNan(NAN));
-  assert(!IsNan(INFINITY));
-  assert(!IsNan(0.0));
-
-  fprintf(stderr, "sizeof(Price): %lu\n", sizeof(Price));
-  fprintf(stderr, "sizeof(PriceSum): %lu\n", sizeof(PriceSum));
-  AccumulatedRates::Test();
-  Volatility::Test();
-  RunAllTests();
-}
 
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
