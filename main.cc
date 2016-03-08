@@ -1225,6 +1225,23 @@ TEST(Volatility) {
     CHECK_EQ(1000000, Volatility::InRatio(0.001).GetRawValue());
     CHECK_EQ(4000000, Volatility::InRatio(0.002).GetRawValue());
   }
+
+  // ボラティリティの和
+  {
+    VolatilitySum s;
+    CHECK(!s.GetAverage().IsValid());
+    s += VolatilitySum::From(Volatility::InRatio(0.01));
+    CHECK_NEAR(1, s.GetWeight(), 1e-7);
+    CHECK_NEAR(0.01, s.GetAverage().GetValue(), 1e-7);
+    s += VolatilitySum::From(Volatility::Invalid());
+    CHECK_NEAR(1, s.GetWeight(), 1e-7);
+    s += VolatilitySum::From(Volatility::InRatio(0.02));
+    CHECK_NEAR(2, s.GetWeight(), 1e-7);
+    CHECK_NEAR(0.01581, s.GetAverage().GetValue(), 1e-5);
+    s -= VolatilitySum::From(Volatility::InRatio(0.01));
+    CHECK_NEAR(1, s.GetWeight(), 1e-7);
+    CHECK_NEAR(0.02, s.GetAverage().GetValue(), 1e-7);
+  }
 }
 
 struct Rate {
