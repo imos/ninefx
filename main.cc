@@ -1150,7 +1150,7 @@ struct VolatilityRoot {
       return StringPrintf("%.6f%%", GetValue() * 100);
     }
 
-    static ValueType InRatio(double ratio) {
+    static ValueType InVolatility(double ratio) {
       ValueType result;
       result.SetValue(ratio);
       return result;
@@ -1159,7 +1159,7 @@ struct VolatilityRoot {
     static ValueType InPriceAndTime(
         PriceDifference price_difference,
         TimeDifference time_difference) {
-      return InRatio(
+      return InVolatility(
           price_difference.GetLogValue() / sqrt(time_difference.GetMinute()));
     }
   };
@@ -1222,23 +1222,23 @@ TEST(Volatility) {
 
   // 後方互換性の確認
   {
-    CHECK_EQ(1000000, Volatility::InRatio(0.001).GetRawValue());
-    CHECK_EQ(4000000, Volatility::InRatio(0.002).GetRawValue());
+    CHECK_EQ(1000000, Volatility::InVolatility(0.001).GetRawValue());
+    CHECK_EQ(4000000, Volatility::InVolatility(0.002).GetRawValue());
   }
 
   // ボラティリティの和
   {
     VolatilitySum s;
     CHECK(!s.GetAverage().IsValid());
-    s += VolatilitySum::From(Volatility::InRatio(0.01));
+    s += VolatilitySum::From(Volatility::InVolatility(0.01));
     CHECK_NEAR(1, s.GetWeight(), 1e-7);
     CHECK_NEAR(0.01, s.GetAverage().GetValue(), 1e-7);
     s += VolatilitySum::From(Volatility::Invalid());
     CHECK_NEAR(1, s.GetWeight(), 1e-7);
-    s += VolatilitySum::From(Volatility::InRatio(0.02));
+    s += VolatilitySum::From(Volatility::InVolatility(0.02));
     CHECK_NEAR(2, s.GetWeight(), 1e-7);
     CHECK_NEAR(0.01581, s.GetAverage().GetValue(), 1e-5);
-    s -= VolatilitySum::From(Volatility::InRatio(0.01));
+    s -= VolatilitySum::From(Volatility::InVolatility(0.01));
     CHECK_NEAR(1, s.GetWeight(), 1e-7);
     CHECK_NEAR(0.02, s.GetAverage().GetValue(), 1e-7);
   }
@@ -1652,7 +1652,7 @@ class AccumulatedRates {
 
   Volatility GetVolatility(Time to) const {
     if (GetParams().base_volatility_interval == 0) {
-      return Volatility::InRatio(1.0002);
+      return Volatility::InVolatility(1.0002);
     }
     Time from = to - TimeDifference::InMinute(
         GetParams().base_volatility_interval);
@@ -1995,7 +1995,7 @@ struct AdjustedPriceRoot {
     Price GetRegularizedPrice(
         TimeDifference interval = TimeDifference::InMinute(1)) const {
       return GetPrice(
-          interval, Price::InRealPrice(1.0), Volatility::InRatio(1e-4));
+          interval, Price::InRealPrice(1.0), Volatility::InVolatility(1e-4));
     }
 
     double GetRatio() const {
@@ -2045,33 +2045,33 @@ TEST(AdjustedPrice) {
     price.Init(Price::InRealPrice(100.01),
                TimeDifference::InMinute(1.0),
                Price::InRealPrice(100),
-               Volatility::InRatio(log(100.01 / 100)));
+               Volatility::InVolatility(log(100.01 / 100)));
     CHECK_NEAR(
         price.GetPrice(
             TimeDifference::InMinute(1.0),
             Price::InRealPrice(100),
-            Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+            Volatility::InVolatility(log(100.01 / 100))).GetRealPrice(),
         100.01,
         1e-4);
     CHECK_NEAR(
         price.GetPrice(
             TimeDifference::InMinute(1.0),
             Price::InRealPrice(200),
-            Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+            Volatility::InVolatility(log(100.01 / 100))).GetRealPrice(),
         200.02,
         1e-4);
     CHECK_NEAR(
         price.GetPrice(
             TimeDifference::InMinute(4.0),
             Price::InRealPrice(100),
-            Volatility::InRatio(log(100.01 / 100))).GetRealPrice(),
+            Volatility::InVolatility(log(100.01 / 100))).GetRealPrice(),
         100.02,
         1e-4);
     CHECK_NEAR(
         price.GetPrice(
             TimeDifference::InMinute(1.0),
             Price::InRealPrice(100),
-            Volatility::InRatio(log(100.02 / 100))).GetRealPrice(),
+            Volatility::InVolatility(log(100.02 / 100))).GetRealPrice(),
         100.02,
         1e-4);
   }
@@ -2845,7 +2845,7 @@ class QFeatures {
       double sum = 0, count = 0;
       for (const auto& feature : features_) {
         sum += feature.GetQFeatureScore(leverage)
-                      .GetScore(Volatility::InRatio(1.5e-4))
+                      .GetScore(Volatility::InVolatility(1.5e-4))
                       .GetLogValue();
         count++;
       }
