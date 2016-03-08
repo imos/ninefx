@@ -1124,7 +1124,7 @@ struct VolatilityRoot {
           static_cast<double>(GetRawValue()) / value.GetRawValue());
     }
 
-    ValueType operator*=(VolatilityRatio ratio) {
+    const ValueType& operator*=(VolatilityRatio ratio) {
       SetRawValue(GetRawValue() * ratio.GetValue());
       return static_cast<const ValueType&>(*this);
     }
