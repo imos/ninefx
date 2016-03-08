@@ -1104,9 +1104,8 @@ struct VolatilityRatio {
 struct Volatility {
  public:
   // 2乗を保存するためのスケール
-  // (e.g. 2 pips の変動は 20000^2 / kVolatilityScaleDeprecated として保存されます．)
+  // (e.g. 2 pips の変動は (0.0002 * kVolatilityScale) ^ 2 として保存されます．)
   static constexpr double kVolatilityScale = 1000000;
-  static const int32_t kVolatilityScaleDeprecated = 10000;
 
   Volatility() : volatility_(-1) {}
 
@@ -1116,8 +1115,9 @@ struct Volatility {
   }
 
   Volatility operator*(VolatilityRatio ratio) const {
-    return Volatility(
-        GetValueDeprecated() * ratio.GetValue() * ratio.GetValue());
+    Volatility result;
+    result.SetRawValue(GetRawValue() * ratio.GetValue() * ratio.GetValue());
+    return result;
   }
 
   bool IsValid() const {
@@ -1135,23 +1135,6 @@ struct Volatility {
 
   double GetValue() const {
     return sqrt(volatility_) / kVolatilityScale;
-  }
-
-  void SetValueDeprecated(double value) {
-    SetValue(sqrt(value / kVolatilityScaleDeprecated) / kVolatilityScale);
-    // CHECK(!IsNan(value));
-    // CHECK(!IsInf(value));
-    // CHECK_GE(value / kVolatilityScaleDeprecated,
-    //          numeric_limits<int32_t>::min());
-    // CHECK_LE(value / kVolatilityScaleDeprecated,
-    //          numeric_limits<int32_t>::max());
-    // CHECK_GE(value, 0);
-    // volatility_ = (int32_t)round(value / kVolatilityScaleDeprecated);
-  }
-
-  double GetValueDeprecated() const {
-    return pow(GetValue() * kVolatilityScale, 2) * kVolatilityScaleDeprecated;
-    // return static_cast<double>(volatility_) * kVolatilityScaleDeprecated;
   }
 
   int32_t GetRawValue() const { return volatility_; }
@@ -1192,12 +1175,6 @@ struct Volatility {
   }
 
  private:
-  Volatility(double volatility)
-      : volatility_((int32_t)round(volatility / kVolatilityScaleDeprecated)) {
-    assert(volatility >= 0);
-    assert(round(volatility / kVolatilityScaleDeprecated) <= 0x7fffffff);
-  }
-
   int32_t volatility_;
 };
 
@@ -1237,29 +1214,6 @@ TEST(Volatility) {
                                        TimeDifference::InMinute(1),
                                        1.0).GetRealPrice();
     CHECK(fabs(ratio - 1.001) < 1e-5) << "Inconsistent interface: " << ratio;
-  }
-
-  // 入出力を確認
-  {
-    Volatility volatility;
-    volatility.SetValueDeprecated(10000);
-    double value = volatility.GetValueDeprecated();
-    CHECK(fabs(value - 10000) < 1e-3) << "Inconsistent interface: " << value;
-  }
-
-  // 入出力を確認
-  {
-    double price_difference = Price::InRealPrice(101).GetLogPrice() -
-                              Price::InRealPrice(100).GetLogPrice();
-    assert(!IsNan(price_difference) && !IsInf(price_difference));
-    Volatility volatility_deprecated;
-    volatility_deprecated.SetValueDeprecated(
-        price_difference * price_difference);
-
-    CHECK_EQ(volatility_deprecated.GetRawValue(),
-             Volatility::InPriceAndTime(
-                 PriceDifference::InRatio(1.01),
-                 TimeDifference::InMinute(1)).GetRawValue());
   }
 
   // 後方互換性の確認
