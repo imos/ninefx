@@ -518,9 +518,6 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
 
   AdditiveScalarBase() : ScalarBase<FinalType, ValueType>()
       { static_cast<FinalType*>(this)->SetWeight(0); }
-  explicit AdditiveScalarBase(ValueType value, WeightType weight)
-      : ScalarBase<FinalType, ValueType>(value)
-      { static_cast<FinalType*>(this)->SetWeight(weight); }
 
   const FinalType& operator-=(FinalType value) {
     this->SetRawValue(this->GetRawValue() - value.GetRawValue());
@@ -549,6 +546,18 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
   FinalType operator/(double ratio) const
       { FinalType result = this->FinalValue(); return result /= ratio; }
 
+  // SegmentTree用の加算関数．
+  // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
+  static FinalType Add(const FinalType& a, const FinalType& b) { return a + b; }
+
+  template<class InputType>
+  static FinalType InRawValueWithWeight(InputType value, double weight) {
+    FinalType result;
+    result.SetRawValue(value);
+    result.SetWeight(weight);
+    return result;
+  }
+
  protected:
   int32_t GetWeight() const { return 0; }
   void SetWeight(double) {}
@@ -558,8 +567,6 @@ template<typename FinalType, typename ValueType = int32_t>
 struct AdditiveScalarWithWeightBase
     : public AdditiveScalarBase<FinalType, ValueType> {
   AdditiveScalarWithWeightBase() : AdditiveScalarBase<FinalType, ValueType>() {}
-  explicit AdditiveScalarWithWeightBase(ValueType value, double weight)
-      : AdditiveScalarBase<FinalType, ValueType>(value, weight) {}
 
   double GetWeight() const { return weight_; }
   void SetWeight(double weight) { weight_ = weight; }
@@ -634,20 +641,8 @@ struct SumBase : public AdditiveScalarWithoutWeightBase<
     return ValueType::InRawValue(this->GetRawValue() / weight);
   }
 
-  // SegmentTree用の加算関数．
-  // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
-  static SumType Add(const SumType& a, const SumType& b) { return a + b; }
-
   static SumType From(ValueType value)
-      { return InRawValue(value.GetRawValue(), 1); }
-
-  template<class InputType>
-  static SumType InRawValue(InputType value, double weight) {
-    SumType result;
-    result.SetRawValue(value);
-    result.SetWeight(weight);
-    return result;
-  }
+      { return SumType::InRawValueWithWeight(value.GetRawValue(), 1); }
 };
 
 struct TimeRoot {
@@ -927,11 +922,20 @@ TEST(Price) {
   CHECK(s.IsValid());
   CHECK_EQ(0, s.GetRawValue());
   s += PriceSum::From(Price::InRealPrice(100.01));
+#ifndef NDEBUG
+  CHECK_EQ(1, s.GetWeight());
+#endif
   CHECK_NEAR(100.01, s.GetAverage(1).GetRealPrice(), 1e-4);
   s += PriceSum::From(Price::InRealPrice(200.01));
+#ifndef NDEBUG
+  CHECK_EQ(2, s.GetWeight());
+#endif
   CHECK_NEAR(exp((log(100.01) + log(200.01)) * 0.5),
              s.GetAverage(2).GetRealPrice(), 1e-4);
   s -= PriceSum::From(Price::InRealPrice(100.01));
+#ifndef NDEBUG
+  CHECK_EQ(1, s.GetWeight());
+#endif
   CHECK_NEAR(200.01, s.GetAverage(1).GetRealPrice(), 1e-4);
 }
 
@@ -1100,83 +1104,83 @@ struct VolatilityRatio {
   float ratio_;
 };
 
-// 分あたりの変動量（差の2乗）を保持します
-struct Volatility {
- public:
+struct VolatilityRoot {
+  typedef int32_t ScalarType;
+
   // 2乗を保存するためのスケール
   // (e.g. 2 pips の変動は (0.0002 * kVolatilityScale) ^ 2 として保存されます．)
   static constexpr double kVolatilityScale = 1000000;
 
-  Volatility() : volatility_(-1) {}
+  struct DifferenceType : public DifferenceBase<VolatilityRoot> {
+    DifferenceType() : DifferenceBase<VolatilityRoot>() {}
+  };
 
-  VolatilityRatio operator/(Volatility value) const {
-    return VolatilityRatio(
-        (float)sqrt((double)volatility_ / value.volatility_));
-  }
+  // 分あたりの変動量（差の2乗）を保持します
+  struct ValueType : public ValueBase<VolatilityRoot> {
+    ValueType() : ValueBase<VolatilityRoot>() {}
 
-  Volatility operator*(VolatilityRatio ratio) const {
-    Volatility result;
-    result.SetRawValue(GetRawValue() * ratio.GetValue() * ratio.GetValue());
-    return result;
-  }
+    VolatilityRatio operator/(ValueType value) const {
+      return VolatilityRatio(
+          static_cast<double>(GetRawValue()) / value.GetRawValue());
+    }
 
-  bool IsValid() const {
-    return volatility_ >= 0;
-  }
+    ValueType operator*=(VolatilityRatio ratio) {
+      SetRawValue(GetRawValue() * ratio.GetValue());
+      return static_cast<const ValueType&>(*this);
+    }
 
-  void SetValue(double value) {
-    value = pow(value * kVolatilityScale, 2.0);
-    CHECK(!IsNan(value));
-    CHECK(!IsInf(value));
-    CHECK_GE(value, 0);
-    CHECK_LE(value, numeric_limits<int32_t>::max());
-    volatility_ = static_cast<int32_t>(round(value));
-  }
+    ValueType operator*(VolatilityRatio ratio) const
+        { ValueType result = *this; return result *= ratio; }
 
-  double GetValue() const {
-    return sqrt(volatility_) / kVolatilityScale;
-  }
+    void SetValue(double value)
+        { SetRawValue(pow(value * kVolatilityScale, 2.0)); }
+    double GetValue() const { return sqrt(GetRawValue()) / kVolatilityScale; }
 
-  int32_t GetRawValue() const { return volatility_; }
-  void SetRawValue(int64_t value) {
-    assert(value >= numeric_limits<int32_t>::min());
-    assert(value <= numeric_limits<int32_t>::max());
-    volatility_ = static_cast<int32_t>(value);
-  }
+    Price GetPrice(Price current_price,
+                   TimeDifference time_difference,
+                   double ratio) const {
+      PriceDifference price_difference;
+      price_difference.SetLogValue(
+          GetValue() * sqrt(time_difference.GetMinute()) * ratio);
+      return current_price + price_difference;
+    }
 
-  Price GetPrice(Price current_price,
-                 TimeDifference time_difference,
-                 double ratio) const {
-    PriceDifference price_difference;
-    price_difference.SetLogValue(
-        GetValue() * sqrt(time_difference.GetMinute()) * ratio);
-    return current_price + price_difference;
-  }
+    string DebugString() const {
+      if (!IsValid()) { return "NaN"; }
+      return StringPrintf("%.6f%%", GetValue() * 100);
+    }
 
-  string DebugString() const {
-    return StringPrintf("%.6f%%", GetValue() * 100);
-  }
+    static ValueType InRatio(double ratio) {
+      ValueType result;
+      result.SetValue(ratio);
+      return result;
+    }
 
-  static Volatility Invalid() {
-    return Volatility();
-  }
+    static ValueType InPriceAndTime(
+        PriceDifference price_difference,
+        TimeDifference time_difference) {
+      return InRatio(
+          price_difference.GetLogValue() / sqrt(time_difference.GetMinute()));
+    }
+  };
 
-  static Volatility InRatio(double ratio) {
-    Volatility result;
-    result.SetValue(ratio);
-    return result;
-  }
+  struct SumType : public AdditiveScalarWithWeightBase<SumType, int64_t> {
+    SumType() : AdditiveScalarWithWeightBase<SumType, int64_t>() {}
 
-  static Volatility InPriceAndTime(
-      PriceDifference price_difference,
-      TimeDifference time_difference) {
-    return InRatio(
-        price_difference.GetLogValue() / sqrt(time_difference.GetMinute()));
-  }
+    ValueType GetAverage() const {
+      if (fabs(GetWeight()) < 1e-7) { return ValueType::Invalid(); }
+      return ValueType::InRawValue(GetRawValue() / GetWeight());
+    }
 
- private:
-  int32_t volatility_;
+    static SumType From(ValueType value) {
+      if (!value.IsValid()) { return SumType(); }
+      return SumType::InRawValueWithWeight(value.GetRawValue(), 1);
+    }
+  };
 };
+
+typedef typename VolatilityRoot::ValueType Volatility;
+typedef typename VolatilityRoot::SumType VolatilitySum;
 
 TEST(Volatility) {
   // ボラティリティ解像度を確認
@@ -1222,75 +1226,6 @@ TEST(Volatility) {
     CHECK_EQ(4000000, Volatility::InRatio(0.002).GetRawValue());
   }
 }
-
-struct VolatilitySum {
- public:
-  VolatilitySum() : volatility_(0), count_(0) {}
-
-  VolatilitySum(const Volatility& volatility)
-      : volatility_(volatility.IsValid() ? volatility.GetRawValue() : 0),
-        count_(volatility.IsValid() ? 1 : 0) {}
-
-  Volatility GetAverageVolatility() const {
-    assert(count_ >= 0);
-    if (count_ == 0) {
-      return Volatility::Invalid();
-    }
-    int64_t new_volatility = (volatility_ + count_ / 2) / count_;
-    assert(0 <= new_volatility);
-    assert(new_volatility < 0x7fffffff);
-    Volatility result;
-    result.SetRawValue((int32_t)new_volatility);
-    return result;
-  }
-
-  VolatilitySum operator+(VolatilitySum x) const {
-    return VolatilitySum(volatility_ + x.volatility_,
-                         count_ + x.count_);
-  }
-
-  const VolatilitySum& operator+=(Volatility value) {
-    if (value.IsValid()) {
-      volatility_ += value.GetRawValue();
-      assert(0 <= volatility_);
-      count_++;
-      assert(0 <= count_);
-    }
-    return *this;
-  }
-
-  const VolatilitySum& operator-=(Volatility value) {
-    if (value.IsValid()) {
-      volatility_ -= value.GetRawValue();
-      assert(0 <= volatility_);
-      count_--;
-      assert(0 <= count_);
-    }
-    return *this;
-  }
-
-  int32_t GetCount() const { return count_; }
-
-  // SegmentTree用の加算関数．
-  // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
-  static VolatilitySum Add(const VolatilitySum& a, const VolatilitySum& b) {
-    return a + b;
-  }
-
-  static VolatilitySum From(const Volatility& value) {
-    return VolatilitySum(value);
-  }
-
- private:
-  VolatilitySum(int64_t volatility, int32_t count)
-      : volatility_(volatility), count_(count) {
-    assert(0 <= volatility_);
-    assert(0 <= count_);
-  }
-
-  int64_t volatility_;
-  int32_t count_;
-};
 
 struct Rate {
  public:
@@ -1456,11 +1391,11 @@ class Rates {
           > kShortVolatilityDuration * 2) {
         return Volatility::Invalid();
       }
-      sum += Volatility::InPriceAndTime(
-          current_price - previous_price, current_time - previous_time);
+      sum += VolatilitySum::From(Volatility::InPriceAndTime(
+          current_price - previous_price, current_time - previous_time));
     }
-    assert(sum.GetCount() == kShortVolatilityDuration);
-    return sum.GetAverageVolatility();
+    assert(sum.GetWeight() == kShortVolatilityDuration);
+    return sum.GetAverage();
   }
 
  private:
@@ -1514,10 +1449,10 @@ class DailyVolatility {
       if (!volatility.IsValid()) { continue; }
       times.push_back(rates[index].GetTime());
       volatilities.push_back(volatility);
-      sum += volatility;
+      sum += VolatilitySum::From(volatility);
 
       while ((times.back() - times.front()).GetSecond() > 60 * 60 * 24 * 7) {
-        sum -= volatilities.front();
+        sum -= VolatilitySum::From(volatilities.front());
         times.pop_front();
         volatilities.pop_front();
       }
@@ -1528,8 +1463,7 @@ class DailyVolatility {
       double current_volatility = volatilities.back().GetValue();
       assert(current_volatility >= 0);
       assert(!IsNan(current_volatility) && !IsInf(current_volatility));
-      double average_volatility =
-          sum.GetAverageVolatility().GetValue();
+      double average_volatility = sum.GetAverage().GetValue();
       assert(average_volatility >= 0);
       assert(!IsNan(average_volatility) && !IsInf(average_volatility));
       daily_volatility_sum[(size_t)time_index]
@@ -1637,7 +1571,8 @@ class AccumulatedRates {
       sum_data.push_back(PriceSum::From(rate.GetAveragePrice()));
       open_.push_back(rate.GetOpenPrice());
       close_.push_back(rate.GetClosePrice());
-      volatility_sum.push_back(VolatilitySum(rates.GetVolatility(rate_index)));
+      volatility_sum.push_back(
+          VolatilitySum::From(rates.GetVolatility(rate_index)));
     }
     int32_t sum = -1;
     for (int32_t& value : count_) {
@@ -1717,7 +1652,7 @@ class AccumulatedRates {
     assert(0 <= to_index && to_index < (int)count_.size());
     assert(from_index <= to_index);
     Volatility volatility =
-        volatility_sum_.Query(from_index, to_index).GetAverageVolatility();
+        volatility_sum_.Query(from_index, to_index).GetAverage();
     assert(volatility.GetRawValue() > 0);
     if (GetParams().daily_volatility) {
       volatility =
@@ -1736,7 +1671,7 @@ class AccumulatedRates {
            "volatility: " +
            volatility_sum_.Query(GetDenseIndexOrNext(GetStartTime()),
                                  GetDenseIndexOrPrevious(GetEndTime()))
-                          .GetAverageVolatility()
+                          .GetAverage()
                           .DebugString();
   }
 
