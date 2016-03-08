@@ -506,10 +506,6 @@ struct ScalarBase {
 
  private:
   ValueType value_;
-
-  // virtualなどの関数を作らせないための制限を設定
-  // static_assert(is_trivially_copyable<FinalType>::value,
-  //               "A scalar value must be trivially copyable.");
 };
 
 template<typename FinalType, typename ValueType = int32_t>
@@ -616,10 +612,6 @@ struct ValueBase
       { ValueType result = this->FinalValue(); return result += value; }
   ValueType operator-(DifferenceType value) const
       { ValueType result = this->FinalValue(); return result -= value; }
-
- private:
-  const ValueType& FinalValue() const
-      { return static_cast<const ValueType&>(*this); }
 };
 
 template<typename RootType>
@@ -850,10 +842,6 @@ struct PriceRoot {
       SetRawValue(price);
       return true;
     }
-
-    // TODO(imos): Fix this.
-    int32_t GetLogPrice() const { return GetRawValue(); }
-    void SetLogPrice(double log_price) { SetRawValue(log_price); }
 
     double GetRealPrice() const { return exp(GetRawValue() / kLogPriceRatio); }
     void SetRealPrice(double real_price)
@@ -1798,22 +1786,22 @@ TEST(AccumulatedRates) {
     assert(rates.Count(Time::InMinute(1001), Time::InMinute(1004)) == 3);
     assert(rate.IsValid());
     assert(fabs(rate.GetTime().GetMinute() - 1002.33333) < 1e-5);
-    assert(rate.GetOpenPrice().GetLogPrice() == 100); 
-    assert(rate.GetHighPrice().GetLogPrice() == 130); 
-    assert(rate.GetLowPrice().GetLogPrice() == 90); 
-    assert(rate.GetClosePrice().GetLogPrice() == 120); 
-    assert(rate.GetAveragePrice().GetLogPrice() == 110); 
+    assert(rate.GetOpenPrice().GetRawValue() == 100); 
+    assert(rate.GetHighPrice().GetRawValue() == 130); 
+    assert(rate.GetLowPrice().GetRawValue() == 90); 
+    assert(rate.GetClosePrice().GetRawValue() == 120); 
+    assert(rate.GetAveragePrice().GetRawValue() == 110); 
   }
   {
     Rate rate = rates.GetRate(Time::InMinute(1001), Time::InMinute(1002));
     assert(rates.Count(Time::InMinute(1001), Time::InMinute(1002)) == 2);
     assert(rate.IsValid());
     assert(fabs(rate.GetTime().GetMinute() - 1001.5) < 1e-3);
-    CHECK_EQ(rate.GetOpenPrice().GetLogPrice(), 100);
-    CHECK_EQ(rate.GetHighPrice().GetLogPrice(), 125); 
-    CHECK_EQ(rate.GetLowPrice().GetLogPrice(), 90); 
-    CHECK_EQ(rate.GetClosePrice().GetLogPrice(), 115); 
-    CHECK_EQ(rate.GetAveragePrice().GetLogPrice(), 108); 
+    CHECK_EQ(rate.GetOpenPrice().GetRawValue(), 100);
+    CHECK_EQ(rate.GetHighPrice().GetRawValue(), 125); 
+    CHECK_EQ(rate.GetLowPrice().GetRawValue(), 90); 
+    CHECK_EQ(rate.GetClosePrice().GetRawValue(), 115); 
+    CHECK_EQ(rate.GetAveragePrice().GetRawValue(), 108); 
   }
   {
     Rate rate = rates.GetRate(Time::InMinute(1005), Time::InMinute(1005));
