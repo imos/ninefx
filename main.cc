@@ -508,8 +508,35 @@ struct ScalarBase {
   ValueType value_;
 };
 
+#define BINARY_OPERATOR(Operator, Left, Right) \
+    Left operator Operator(Right r) const \
+        { Left l = static_cast<const Left&>(*this); return l Operator ## = r; }
+
+// Left -= Right を別途定義されるならば，和差算を定義される．
+template<typename Left, typename Right>
+struct AdditiveInterface {
+  Left operator+=(Right r) { return static_cast<Left&>(*this) -= -r; }
+  BINARY_OPERATOR(+, Left, Right);
+  BINARY_OPERATOR(-, Left, Right);
+};
+
+// コンストラクタが 0 で初期化され，FinalType -= FinalType を別途定義されるならば，
+// -FinalType が定義される．
+template<typename FinalType>
+struct InversableInterface : public AdditiveInterface<FinalType, FinalType> {
+  FinalType operator-() const {
+    FinalType result;
+    TCHECK(result.IsValid());
+    return result -= static_cast<const FinalType&>(*this);
+  }
+  // NOTE: operator-が曖昧になるため再定義
+  BINARY_OPERATOR(-, FinalType, FinalType);
+};
+
 template<typename FinalType, typename ValueType = int32_t>
-struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
+struct AdditiveScalarBase
+    : public ScalarBase<FinalType, ValueType>,
+      public InversableInterface<FinalType> {
   typedef double WeightType;
 
   AdditiveScalarBase() : ScalarBase<FinalType, ValueType>()
@@ -521,14 +548,6 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
         static_cast<FinalType*>(this)->GetWeight() - value.GetWeight());
     return this->FinalValue();
   }
-  FinalType operator-() const
-      { FinalType result; return result -= this->FinalValue(); }
-  FinalType operator-(FinalType value) const
-      { FinalType result = this->FinalValue(); return result -= value; }
-  FinalType operator+=(FinalType value)
-      { return static_cast<FinalType&>(*this) -= -value; }
-  FinalType operator+(FinalType value) const
-      { return static_cast<const FinalType&>(*this) - -value; }
 
   const FinalType& operator*=(double ratio) {
     this->SetRawValue(this->GetRawValue() * ratio);
@@ -536,11 +555,9 @@ struct AdditiveScalarBase : public ScalarBase<FinalType, ValueType> {
         static_cast<FinalType*>(this)->GetWeight() * ratio);
     return this->FinalValue();
   }
-  FinalType operator*(double ratio) const
-      { FinalType result = this->FinalValue(); return result *= ratio; }
   const FinalType& operator/=(double ratio) { return *this *= 1 / ratio; }
-  FinalType operator/(double ratio) const
-      { FinalType result = this->FinalValue(); return result /= ratio; }
+  BINARY_OPERATOR(*, FinalType, double);
+  BINARY_OPERATOR(/, FinalType, double);
 
   // SegmentTree用の加算関数．
   // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
@@ -591,7 +608,9 @@ struct DifferenceBase
 template<typename RootType>
 struct ValueBase
     : public ScalarBase<typename RootType::ValueType,
-                        typename RootType::ScalarType> {
+                        typename RootType::ScalarType>,
+      public AdditiveInterface<typename RootType::ValueType,
+                               typename RootType::DifferenceType> {
   typedef ScalarBase<typename RootType::ValueType,
                      typename RootType::ScalarType> ParentType;
   typedef typename RootType::DifferenceType DifferenceType;
@@ -599,19 +618,16 @@ struct ValueBase
 
   ValueBase() : ParentType() { this->Invalidate(); }
 
+  const ValueType& operator-=(DifferenceType value) {
+    this->SetRawValue(this->GetRawValue() - value.GetRawValue());
+    return this->FinalValue();
+  }
+
   DifferenceType operator-(ValueType value) const {
     return DifferenceType::InRawValue(
         this->GetRawValue() - value.GetRawValue());
   }
-  const ValueType& operator+=(DifferenceType value) {
-    this->SetRawValue(this->GetRawValue() + value.GetRawValue());
-    return this->FinalValue();
-  }
-  const ValueType& operator-=(DifferenceType value) { return *this += -value; }
-  ValueType operator+(DifferenceType value) const
-      { ValueType result = this->FinalValue(); return result += value; }
-  ValueType operator-(DifferenceType value) const
-      { ValueType result = this->FinalValue(); return result -= value; }
+  BINARY_OPERATOR(-, ValueType, DifferenceType);  // 再定義
 };
 
 template<typename RootType>
@@ -2181,13 +2197,16 @@ struct AdjustedRate {
   AdjustedPrice average_;
 };
 
-struct AdjustedRateSum {
+struct AdjustedRateSum : public InversableInterface<AdjustedRateSum> {
  public:
   AdjustedRateSum() {}
   AdjustedRateSum(const AdjustedRate& t)
       : high_(AdjustedPriceSum::From(t.GetHighPrice())),
         low_(AdjustedPriceSum::From(t.GetLowPrice())),
         average_(AdjustedPriceSum::From(t.GetAveragePrice())) {}
+
+  bool IsValid() const
+      { return high_.IsValid() && low_.IsValid() && average_.IsValid(); }
 
   AdjustedRate GetAverage(int count) const {
     AdjustedRate result;
@@ -2197,25 +2216,12 @@ struct AdjustedRateSum {
     return result;
   }
 
-  AdjustedRateSum operator+(const AdjustedRateSum& x) const {
-    return AdjustedRateSum(high_ + x.high_,
-                           low_ + x.low_,
-                           average_ + x.average_);
-  }
-
-  // SegmentTree用の加算関数．
-  // NOTE: SegmentTreeの関数はconst参照渡しのみ対応．
-  static AdjustedRateSum Add(const AdjustedRateSum& a,
-                             const AdjustedRateSum& b) {
-    return a + b;
+  AdjustedRateSum operator-=(const AdjustedRateSum& value) {
+    high_ -= value.high_; low_ -= value.low_; average_ -= value.average_;
+    return *this;
   }
 
  private:
-  AdjustedRateSum(const AdjustedPriceSum& high,
-                  const AdjustedPriceSum& low,
-                  const AdjustedPriceSum& average)
-      : high_(high), low_(low), average_(average) {}
-
   AdjustedPriceSum high_;
   AdjustedPriceSum low_;
   AdjustedPriceSum average_;
