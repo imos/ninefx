@@ -322,6 +322,8 @@ uint32_t Rand() {
   return static_cast<uint32_t>(x = x ^ (x << 17));
 }
 
+#define CLEAR_LINE "\033[1A\033[2K"
+
 void Parallel(const function<bool(int)>& f) {
   if (GetParams().num_threads == 0) {
     while (f(0));
@@ -336,11 +338,17 @@ void Parallel(const function<bool(int)>& f) {
 }
 
 template<class T, class S = T>
-void ParallelFor(
-    T begin, T end, S step, S chunk_step, const function<void(T)>& f) {
+void ParallelFor(T begin,
+                 T end,
+                 S step,
+                 S chunk_step,
+                 bool show_progress,
+                 const function<void(T)>& f) {
   T next = begin;
+  int percentage = 0;
+  if (show_progress) { fprintf(stderr, "- Processing...\n"); }
   mutex t_mutex;
-  Parallel([&](int) {
+  Parallel([&](int thread_id) {
     T base;
     {
       lock_guard<mutex> t_mutex_guard(t_mutex);
@@ -349,12 +357,20 @@ void ParallelFor(
       next += chunk_step;
     }
 
+    if (thread_id == 0 && show_progress) {
+      for (; begin + (end - begin) * (percentage * 0.01) < base; percentage++)
+          { fprintf(stderr, CLEAR_LINE "- Processing %d%%...\n", percentage); }
+    }
+
     for (T current = base; current < end && current < base + chunk_step;
          current += step) {
       f(current);
     }
     return true;
   });
+  if (show_progress) {
+    fprintf(stderr, CLEAR_LINE "- Successfully processed.\n");
+  }
 }
 
 TEST(Parallel) {
@@ -362,6 +378,7 @@ TEST(Parallel) {
   mutex sum_mutex;
   ParallelFor<size_t>(
       1 /* begin */, 1000 /* end */, 1 /* step */, 10 /* chunk_step */,
+      false /* show_progress */,
       [&](size_t value) {
         volatile size_t volatile_value = 0;
         for (volatile size_t i = 0; i < value; i++) { volatile_value++; }
@@ -373,8 +390,6 @@ TEST(Parallel) {
       });
   CHECK_EQ(sum, 499500);
 }
-
-#define CLEAR_LINE "\033[1A\033[2K"
 
 template<typename T, typename X, X F(const X&, const X&)>
 class SegmentTree {
@@ -943,68 +958,6 @@ TEST(Price) {
   CHECK_NEAR(200.01, s.GetAverage(1).GetRealPrice(), 1e-4);
 }
 
-// [start_time, end_time) の時間を 1 分単位でイテレートします．
-class TimeIterator {
- public:
-  TimeIterator(Time start_time, Time end_time, bool show_progress)
-      : start_time_(start_time),
-        end_time_(end_time),
-        next_time_(start_time),
-        show_progress_(show_progress) {
-    CHECK(start_time_.IsValid());
-    CHECK(end_time_.IsValid());
-    CHECK_LE(start_time_, end_time_);
-    if (show_progress_) {
-      fprintf(stderr, "- Processing 0%%...\n");
-    }
-  }
-
-  size_t Count() const {
-    return end_time_.GetMinuteIndex() - start_time_.GetMinuteIndex();
-  }
-
-  int GetPercentage(Time time) const {
-    return 100 * (time.GetMinuteIndex() - start_time_.GetMinuteIndex())
-           / (end_time_.GetMinuteIndex() - start_time_.GetMinuteIndex());
-  }
-
-  Time GetAndIncrement() {
-    Time time;
-    {
-      lock_guard<mutex> mutex_guard_(mutex);
-      time = next_time_;
-      if (!(time < end_time_)) {
-        time = Time::Invalid();
-      }
-      next_time_.AddMinute(1);
-    }
-    if (show_progress_) {
-      if (time.IsValid()) {
-        int percentage = GetPercentage(time);
-        if (percentage !=
-            GetPercentage(time - TimeDifference::InMinute(1))) {
-          fprintf(stderr,
-                  CLEAR_LINE "- Processing %d%%...\n",
-                  percentage);
-        }
-      } else {
-        fprintf(stderr, CLEAR_LINE "Successfully processed.\n");
-        show_progress_ = false;
-      }
-    }
-    return time;
-  }
-
- private:
-  Time start_time_;
-  Time end_time_;
-  mutex mutex_;
-  Time next_time_;
-  bool show_progress_;
-
-  DISALLOW_COPY_AND_ASSIGN(TimeIterator);
-};
-
 struct Asset {
  public:
   Asset() : currency_(1.0),
@@ -1132,9 +1085,7 @@ struct VolatilityRoot {
       SetRawValue(GetRawValue() * ratio.GetValue());
       return static_cast<const ValueType&>(*this);
     }
-
-    ValueType operator*(VolatilityRatio ratio) const
-        { ValueType result = *this; return result *= ratio; }
+    BINARY_OPERATOR(*, ValueType, VolatilityRatio);
 
     void SetValue(double value)
         { SetRawValue(pow(value * kVolatilityScale, 2.0)); }
@@ -2617,22 +2568,24 @@ class QFeatures {
          r += max(1, ratio_range / 2)) {
       ratios.push_back(r);
     }
-    TimeIterator iterator(
-        rates.GetStartTime(), rates.GetEndTime(), true /* show_progress */);
-    rewards_.resize(ratios.size(), vector<QFeatureReward>(iterator.Count()));
-    Parallel([&](int){
-      Time time = iterator.GetAndIncrement();
-      if (!time.IsValid()) { return false; }
-      for (size_t ratio_index = 0; ratio_index < ratios.size(); ratio_index++) {
-        int reward_index =
-            time.GetMinuteIndex() - rates.GetStartTime().GetMinuteIndex();
-        CHECK_LE(0, reward_index);
-        CHECK_LT(reward_index, rewards_[ratio_index].size());
-        rewards_[ratio_index][reward_index]
-            .Init(features_, config, rates, time, ratios[ratio_index]);
-      }
-      return true;
-    });
+    rewards_.resize(ratios.size(), vector<QFeatureReward>(
+        rates.GetEndTime().GetMinuteIndex() -
+        rates.GetStartTime().GetMinuteIndex()));
+    ParallelFor<Time>(
+        rates.GetStartTime(), rates.GetEndTime(),
+        TimeDifference::InMinute(1), TimeDifference::InMinute(1),
+        true /* progress */,
+        [&](Time time) {
+          for (size_t ratio_index = 0;
+               ratio_index < ratios.size(); ratio_index++) {
+            int reward_index =
+                time.GetMinuteIndex() - rates.GetStartTime().GetMinuteIndex();
+            CHECK_LE(0, reward_index);
+            CHECK_LT(reward_index, rewards_[ratio_index].size());
+            rewards_[ratio_index][reward_index]
+                .Init(features_, config, rates, time, ratios[ratio_index]);
+          }
+        });
 
     // 転置インデックス (feature_rewards_) の生成
     feature_rewards_ = vector<vector<QFeatureReward*>>(features_.size());
@@ -2785,7 +2738,7 @@ class QFeatures {
   void CalculateScore() {
     ParallelFor<size_t>(
       0 /* begin */, rewards_[0].size() /* end */,
-      1 /* step */, 1440 /* big_step */,
+      1 /* step */, 1440 /* big_step */, false /* show_progress */,
       [&](size_t reward_id) {
         for (size_t ratio_id = 0; ratio_id < rewards_.size(); ratio_id++) {
           CHECK_LT(reward_id, rewards_[ratio_id].size());
@@ -2824,7 +2777,7 @@ class QFeatures {
 
     ParallelFor<size_t>(
       0 /* begin */, feature_rewards_.size() /* end */,
-      1 /* step */, 1 /* big_step */,
+      1 /* step */, 1 /* big_step */, false /* show_progress */,
       [&](size_t feature_id) {
         for (const QFeatureReward* reward : feature_rewards_[feature_id]) {
           LearnReward(*reward, feature_id, ratio);
